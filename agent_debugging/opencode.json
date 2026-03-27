@@ -1,4 +1,4 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "amazon-bedrock/mistral.voxtral-small-24b-2507"
+  "model": "amazon-bedrock/anthropic.claude-sonnet-4-6"
 }

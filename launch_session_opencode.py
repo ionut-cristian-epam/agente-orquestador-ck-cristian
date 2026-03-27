@@ -103,12 +103,12 @@ SUPPORTED_MODELS = [
 
 
 class Session:
-    def __init__(self, name, working_dir, LLM="opencode/nemotron-3-super-free"):
+    def __init__(self, name, working_dir, LLM="opencode/nemotron-3-super-free",capture_output=True):
         self.name = name
         self.working_dir = working_dir
         self.LLM = LLM
         self._set_model_in_config()
-        self.create_session()
+        self.create_session(capture_output=capture_output)
     
     def _set_model_in_config(self):
         if self.LLM not in SUPPORTED_MODELS:
@@ -144,14 +144,22 @@ class Session:
         
         return ''.join(output_lines) if capture_output else None
     
-    def create_session(self):
+    def create_session(self,capture_output=True):
         print(f"\n--- Creating session: {self.name} (in {self.working_dir}) ---")
-        self._run(["acpx", "opencode", "sessions", "new", "--name", self.name])
+        self._run(["acpx", "opencode", "sessions", "new", "--name", self.name],capture_output=capture_output)
+
+    def _filter_output(self, raw_output):
+        lines = raw_output.splitlines()
+        content_lines = [line for line in lines if not line.startswith('[')]
+        return '\n'.join(content_lines).strip()
 
     def prompt_session(self, prompt, capture_output=False):
         if not capture_output:
             print(f"\n--- [{self.name}] {prompt} ---")
-        return self._run(["acpx", "opencode", "-s", self.name, prompt], capture_output=capture_output)
+        raw = self._run(["acpx", "opencode", "-s", self.name, prompt], capture_output=capture_output)
+        if capture_output and raw is not None:
+            return self._filter_output(raw)
+        return raw
     def close_session(self):
         print(f"\n--- Closing session: {self.name} ---")
         self._run(["acpx", "opencode", "sessions", "close", self.name])
@@ -162,18 +170,23 @@ if __name__ == "__main__":
     debugging_session = Session(
         name="agent_debugging",
         working_dir=os.path.join(os.path.dirname(__file__), "agent_debugging"),
-        LLM= "amazon-bedrock/mistral.voxtral-small-24b-2507"
+        LLM= "amazon-bedrock/anthropic.claude-sonnet-4-6",
+        capture_output=True
     )
-    debugging_session.prompt_session("What is your LLM")
+    deb = debugging_session.prompt_session("What is your LLM",capture_output=True)
+    print(f"Debugging Session Output:\n{deb}")
     
 
     documentation_session = Session(
         name="agent_documentation",
-        working_dir=os.path.join(os.path.dirname(__file__), "agent_documentation")
+        working_dir=os.path.join(os.path.dirname(__file__), "agent_documentation"),
+        LLM= "amazon-bedrock/moonshot.kimi-k2-thinking",
+        capture_output=True
+        
       
     )
-    documentation_session.prompt_session("What is your LLM")
-
+    doc = documentation_session.prompt_session("What is your LLM",capture_output=True)
+    print(f"Documentation Session Output:\n{doc}")
     debugging_session.close_session()
     documentation_session.close_session()
     
