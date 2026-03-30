@@ -2,3 +2,5 @@
 .codemie
 .vscode
 guides/
+__pycache__/
+.gitignore
