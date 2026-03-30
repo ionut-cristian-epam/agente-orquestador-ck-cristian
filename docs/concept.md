@@ -27,7 +27,7 @@ The result:
 - **Persistent sessions**: Sessions survive across invocations and crash-recover automatically. Named sessions enable parallel workstreams in the same project.
 - **Python-first**: The entire orchestration layer is Python — easy to extend, test, and integrate with existing Python tooling (CI pipelines, REST APIs, data processing).
 
-### What we take from it
+### What we take from it (ComposioHQ/Agent-orchestrator Inspiration)
 
 | Concept | Reference Implementation | Our Adaptation |
 |---------|--------------------------|----------------|
@@ -72,7 +72,6 @@ Adding a new agent requires zero orchestrator changes — just `acpx <new-agent>
 - No Node.js/TypeScript toolchain required
 - Integrates naturally with Python CI/CD pipelines, REST frameworks, and data tools
 - Dependencies are minimal: `pydantic`, `httpx`, `anyio`
-- The `opencode-ai` Python SDK provides direct REST API access when CLI isn't sufficient
 
 ### 4. Lightweight by Design
 

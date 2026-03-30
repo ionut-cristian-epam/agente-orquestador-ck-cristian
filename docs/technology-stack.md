@@ -158,7 +158,7 @@ The `index.json` structure (referenced in [remove_session.py](../remove_session.
 **OpenCode** is an open-source AI coding agent with 131k+ GitHub stars. It provides a terminal UI and a client/server architecture that supports multiple LLM providers.
 
 **Source**: [github.com/sst/opencode](https://github.com/sst/opencode) (by anomalyco/SST)  
-**Install**: `npm i -g opencode-ai@latest` or `brew install opencode`  
+**Install**: `npm i -g opencode` or `brew install opencode`  
 **Docs**: [opencode.ai/docs](https://opencode.ai/docs)
 
 ### Key Characteristics
@@ -194,56 +194,13 @@ The project supports 90+ models across AWS Bedrock and OpenCode's free tier, val
 
 ---
 
-## Python SDK: opencode-ai
-
-### What is it
-
-The `opencode-ai` Python library provides REST API access to OpenCode sessions. It offers both synchronous and asynchronous clients for programmatic control.
-
-**Package**: [pypi.org/project/opencode-ai](https://pypi.org/project/opencode-ai/) (v0.1.0a36)  
-**Source**: [github.com/sst/opencode-sdk-python](https://github.com/sst/opencode-sdk-python)
-
-### Usage
-
-```python
-from opencode_ai import Opencode
-
-client = Opencode()
-sessions = client.session.list()
-```
-
-Async:
-```python
-from opencode_ai import AsyncOpencode
-
-client = AsyncOpencode()
-sessions = await client.session.list()
-```
-
-Streaming:
-```python
-stream = client.event.list()
-for events in stream:
-    print(events)
-```
-
-### Role in This Project
-
-Available as a dependency for direct REST API access. As the orchestrator grows, the SDK enables:
-- Direct REST API calls when CLI overhead is undesirable
-- Async session management for parallel agent orchestration
-- Streaming responses for real-time agent monitoring
-- Programmatic session introspection without parsing CLI output
-
----
-
 ## Supported Agents via acpx
 
 `acpx` provides built-in ACP adapters for these coding agents:
 
 | Agent | Command | Adapter | Notes |
 |-------|---------|---------|-------|
-| **OpenCode** | `acpx opencode` | `npx -y opencode-ai acp` | Default agent in this project |
+| **OpenCode** | `acpx opencode` | native ACP bridge | Default agent in this project |
 | **Codex** | `acpx codex` | `codex-acp` | OpenAI Codex CLI |
 | **Claude Code** | `acpx claude` | `claude-agent-acp` | Anthropic Claude Code |
 | **Pi** | `acpx pi` | `pi-acp` | Pi Coding Agent |
@@ -267,7 +224,7 @@ To use a different agent, change the `acpx opencode` calls in `Session._run()` t
 
 ### What is githubkit
 
-**githubkit** is a modern, fully-typed GitHub SDK for Python inspired by [octokit](https://github.com/octokit). It provides async-native access to GitHub's REST API, GraphQL API, and typed webhook event parsing.
+**githubkit** is a modern, fully-typed GitHub SDK for Python inspired by [octokit](https://github.com/octokit). It provides thread-safe access to GitHub's REST API, GraphQL API, and typed webhook event parsing.
 
 **Package**: [pypi.org/project/githubkit](https://pypi.org/project/githubkit/) (v0.15.1)  
 **Source**: [github.com/yanyongyu/githubkit](https://github.com/yanyongyu/githubkit) (MIT license)  
@@ -278,7 +235,7 @@ To use a different agent, change the `acpx opencode` calls in `Session._run()` t
 | | **githubkit** | **PyGithub** | **httpx raw** |
 |---|---|---|---|
 | **License** | MIT | LGPL-3.0 | — |
-| **Async** | Native | No | Manual |
+| **Thread-safe** | Full support | Partial | Manual |
 | **Pydantic models** | Built-in | No | Manual |
 | **HTTP client** | httpx (same as this project) | requests | httpx |
 | **GraphQL** | Yes | No | Manual |
@@ -286,11 +243,11 @@ To use a different agent, change the `acpx opencode` calls in `Session._run()` t
 | **Typing** | Full | Partial | Manual |
 | **Webhook parsing** | Typed events | No | Manual |
 
-githubkit uses **httpx + Pydantic** — the exact same foundation as the rest of this project. Zero new dependencies, same async patterns.
+githubkit uses **httpx + Pydantic** — the exact same foundation as the rest of this project. Zero new dependencies, thread-safe patterns for concurrent execution.
 
 ### Key Features for This Project
 
-- **Async-native**: Same `await` pattern as `AsyncOpencode` — fits the existing `Session` class
+- **Thread-safe**: Works seamlessly with ThreadPoolExecutor for concurrent session management without blocking
 - **Typed webhook events**: Critical for the reaction system — parse `CheckRunEvent`, `PullRequestReviewEvent`, etc. without manual JSON handling
 - **GraphQL support**: Batch queries (e.g., fetch all open PRs + CI status in one call) instead of N+1 REST requests
 - **REST API versioning**: Always up to date with GitHub's API, including GHEC support
@@ -300,14 +257,14 @@ githubkit uses **httpx + Pydantic** — the exact same foundation as the rest of
 ```python
 from githubkit import GitHub
 
-# Async — same pattern as the Session class
+# Thread-safe usage with ThreadPoolExecutor
 github = GitHub("<token>")
-resp = await github.rest.repos.async_get("owner", "repo")
+resp = github.rest.repos.get("owner", "repo")
 repo = resp.parsed_data
 print(repo.full_name)
 
 # Create a PR
-await github.rest.pulls.async_create(
+github.rest.pulls.create(
     "owner", "repo",
     title="Fix: resolve flaky test",
     head="fix/flaky-test",
@@ -316,7 +273,7 @@ await github.rest.pulls.async_create(
 )
 
 # Check CI status
-statuses = await github.rest.repos.async_get_combined_status_for_ref(
+statuses = github.rest.repos.get_combined_status_for_ref(
     "owner", "repo", "fix/flaky-test"
 )
 print(statuses.parsed_data.state)  # "success" | "failure" | "pending"
@@ -326,17 +283,20 @@ print(statuses.parsed_data.state)  # "success" | "failure" | "pending"
 
 ```python
 from githubkit.webhooks import parse
+from concurrent.futures import ThreadPoolExecutor
+
+executor = ThreadPoolExecutor(max_workers=5)
 
 # Parse incoming webhook → typed event object
 event = parse(request.headers, request.body)
 
-# CI failure → re-prompt agent
+# CI failure → re-prompt agent (runs in thread pool)
 if event.action == "completed" and event.check_run.conclusion == "failure":
-    await session.prompt_session(f"CI failed: {event.check_run.output.summary}")
+    executor.submit(session.prompt_session, f"CI failed: {event.check_run.output.summary}")
 
-# Review comment → route to agent
+# Review comment → route to agent (runs in thread pool)
 if event.action == "submitted" and event.review.state == "changes_requested":
-    await session.prompt_session(f"Review feedback: {event.review.body}")
+    executor.submit(session.prompt_session, f"Review feedback: {event.review.body}")
 ```
 
 ### Role in This Project
@@ -362,7 +322,7 @@ githubkit enables the full **reaction lifecycle**:
 #### Why Textual for Phase 1
 
 - **Pure Python** — no JavaScript toolchain, no React/Vue build step
-- **Async-native** — runs on asyncio, same as the orchestrator
+- **Cross-platform** — runs in terminal and browser via `textual serve`
 - **Terminal + browser** — `textual serve` exposes any Textual app as a web page
 - **Rich widget library** — DataTable, Log, Tree, Input, ProgressBar out of the box
 - **Fast to build** — working session dashboard in days, not weeks
@@ -453,11 +413,10 @@ From [requirements.txt](../requirements.txt):
 
 | Package | Version | Role |
 |---------|---------|------|
-| `opencode-ai` | 0.1.0a36 | Python SDK for OpenCode REST API |
 | `pydantic` | 2.12.5 | Data validation and settings management |
 | `pydantic_core` | 2.41.5 | Pydantic core (Rust-backed) |
-| `httpx` | 0.28.1 | HTTP client (used by opencode-ai) |
-| `anyio` | 4.13.0 | Async compatibility layer (asyncio/trio) |
+| `httpx` | 0.28.1 | HTTP client for GitHub API calls |
+| `threading` | built-in | Thread pool support for concurrent sessions |
 | `certifi` | 2026.2.25 | TLS certificate bundle |
 | `h11` | 0.16.0 | HTTP/1.1 protocol library |
 | `httpcore` | 1.0.9 | Low-level HTTP transport |
@@ -472,9 +431,9 @@ From [requirements.txt](../requirements.txt):
 
 **Pydantic** — Used for defining session models, configuration schemas, and validating agent responses. When the orchestrator grows beyond the current `Session` class, Pydantic models will define the session state machine, agent configs, and event types.
 
-**httpx** — The async-capable HTTP client that powers the `opencode-ai` SDK. Also available directly for making REST calls to ACP servers when bypassing the CLI layer.
+**httpx** — HTTP client for making REST calls to GitHub API and other external services. Used by the orchestrator for PR creation, CI status checks, and webhook interactions.
 
-**anyio** — Provides async primitives that work with both `asyncio` and `trio`. Enables the orchestrator to manage multiple agent sessions concurrently without blocking.
+**threading** — Python's built-in `concurrent.futures.ThreadPoolExecutor` for managing multiple concurrent agent sessions without blocking. Each session runs in its own worker thread.
 
 ---
 
@@ -490,7 +449,7 @@ From [requirements.txt](../requirements.txt):
 Agent-specific:
 | Agent | Requirement |
 |-------|-------------|
-| OpenCode | `npm i -g opencode-ai` or `brew install opencode` |
+| OpenCode | `npm i -g opencode` or `brew install opencode` |
 | Claude Code | Anthropic API key + `claude` CLI |
 | Codex | OpenAI API key + Codex CLI |
 | Gemini | Google API key + Gemini CLI |
@@ -505,12 +464,11 @@ API keys are configured through environment variables or agent-specific config f
 |-------|------|------|--------|
 | **Agent protocol** | `acpx` | Headless ACP CLI — session management | In use |
 | **Default agent** | OpenCode | AI coding agent (provider-agnostic) | In use |
-| **Agent SDK** | `opencode-ai` | Python REST client for OpenCode | In use |
 | **Data models** | Pydantic | Shared validation across all layers | In use |
-| **HTTP client** | httpx | Shared async HTTP across all layers | In use |
-| **Async runtime** | anyio | Concurrent session management | In use |
+| **HTTP client** | httpx | HTTP client for GitHub API and external services | In use |
+| **Threading** | `concurrent.futures.ThreadPoolExecutor` | Concurrent session management | In use |
 | **GitHub integration** | githubkit | REST + GraphQL + typed webhook events | Planned |
 | **Frontend (Phase 1)** | Textual | TUI dashboard + browser via `textual serve` | Planned |
 | **API backend (Phase 2)** | FastAPI | REST/WebSocket API for web dashboard | Planned |
 
-All planned tools share the same **httpx + Pydantic** foundation — zero dependency conflicts, same async patterns everywhere.
+All planned tools share the same **httpx + Pydantic** foundation — zero dependency conflicts, same thread-safe patterns everywhere.

@@ -58,14 +58,14 @@ class Session:
         self.create_session(capture_output)  # acpx sessions new
 
     def _set_model_in_config(self):       # Validate LLM against SUPPORTED_MODELS, write opencode.json
-    def _run(self, cmd, capture_output):  # subprocess.Popen with line-by-line stdout streaming
+    def _run(self, cmd, capture_output):  # ThreadPool executor with line-by-line stdout streaming
     def create_session(self, capture_output):  # acpx opencode sessions new --name <name>
     def _filter_output(self, raw_output):      # Strip lines starting with '[' (acpx metadata)
     def prompt_session(self, prompt, capture_output):  # acpx opencode -s <name> "<prompt>"
     def close_session(self):              # acpx opencode sessions close <name>
 ```
 
-**Model validation**: Before creating a session, `_set_model_in_config()` validates the requested LLM against a `SUPPORTED_MODELS` list (~90 models across AWS Bedrock and OpenCode free tier). Invalid models raise a `ValueError` immediately — fail fast, no wasted API calls.
+**Model validation**: Before creating a session, `_set_model_in_config()` validates the requested LLM against a `SUPPORTED_MODELS` list (~90 models across AWS Bedrock and OpenCode). Invalid models raise a `ValueError` immediately — fail fast, no wasted API calls.
 
 **Config injection**: The model is written to `opencode.json` in the agent's working directory before launching the session. This is how OpenCode knows which LLM to use.
 
@@ -270,7 +270,7 @@ agent_debugging/
 
 | Decision | Rationale |
 |----------|-----------|
-| **Shell via `subprocess.Popen`** | Simple, synchronous model that's easy to debug. No async complexity until needed. `shell=True` allows piping and glob expansion in commands. |
+| **ThreadPool Executor** | Leverages Python's `concurrent.futures.ThreadPoolExecutor` for non-blocking execution. Multiple sessions run concurrently in worker threads, with thread-safe output handling and simple synchronous API. No async complexity. |
 | **`acpx` as CLI intermediary** | Avoids reimplementing ACP protocol in Python. Handles session persistence, crash recovery, prompt queueing. Swapping agents is a one-line change. |
 | **Model validation at init** | Fail fast — catch typos and unsupported models before spawning any processes or making API calls. |
 | **Config injection (opencode.json)** | Dynamic model selection per session without environment variables or CLI flags. Each agent directory gets its own config. |
@@ -282,12 +282,13 @@ agent_debugging/
 
 ## Future Architecture Direction
 
-### Phase 1 — Async + Concurrent Sessions
+### Phase 1 — Thread Pool + Concurrent Sessions
 
-Move from sequential `subprocess.Popen` to async execution:
-- Replace `_run()` with `asyncio.create_subprocess_exec()`
+Scale from sequential execution to parallel sessions using `ThreadPoolExecutor`:
+- Implement `ThreadPoolExecutor(max_workers=N)` to run multiple `_run()` calls concurrently
+- Each session's CLI command executes in its own worker thread
 - Enable parallel agent sessions (e.g., debugging + documentation running concurrently)
-- Use `anyio` for async primitives (already in dependencies)
+- Thread-safe output aggregation with unique session identifiers
 
 ### Phase 2 — GitHub Reaction Loop
 
