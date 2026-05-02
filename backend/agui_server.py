@@ -42,7 +42,7 @@ from acp_to_agui import map_acp_event
 from available_models import SUPPORTED_MODELS_OPENCODE, SUPPORTED_MODELS_COPILOT_CLI
 
 PROJECT_ROOT = Path(
-    os.environ.get("AGENT_ORCH_PROJECT_ROOT", Path(__file__).resolve().parent)
+    os.environ.get("AGENT_ORCH_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
 SESSIONS_DIR = PROJECT_ROOT / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)

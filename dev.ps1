@@ -6,7 +6,7 @@ if (-not $env:NAGA_API_KEY) {
     Write-Host "Set it with: `$env:NAGA_API_KEY = 'your-key-here'" -ForegroundColor Yellow
 }
 
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "`$env:NAGA_API_KEY='$env:NAGA_API_KEY'; cd '$root'; python -m uvicorn agui_server:app --host 127.0.0.1 --port 8000 --reload"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "`$env:NAGA_API_KEY='$env:NAGA_API_KEY'; cd '$root'; python run.py"
 
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\frontend'; npm run dev"
 

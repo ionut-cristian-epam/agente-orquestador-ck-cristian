@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(
-    os.environ.get("AGENT_ORCH_PROJECT_ROOT", Path(__file__).resolve().parent)
+    os.environ.get("AGENT_ORCH_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
 LOCAL_SESSIONS_DIR = PROJECT_ROOT / "sessions"
 ACPX_SESSIONS_DIR = Path.home() / ".acpx" / "sessions"
