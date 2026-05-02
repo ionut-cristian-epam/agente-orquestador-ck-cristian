@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import warnings
 from typing import AsyncIterator
 
@@ -52,7 +53,7 @@ class Session:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            shell=True,
+            shell=(sys.platform == "win32"),
             cwd=self.working_dir,
         ) as proc:
             for line in proc.stdout:
@@ -113,12 +114,12 @@ class Session:
 
         def _run_in_thread():
             proc = subprocess.Popen(
-                subprocess.list2cmdline(cmd),
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
-                shell=True,
+                shell=(sys.platform == "win32"),
                 cwd=self.working_dir,
             )
             assert proc.stdin and proc.stdout
