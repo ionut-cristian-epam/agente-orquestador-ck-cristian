@@ -2,179 +2,133 @@ import json
 import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(
+    os.environ.get("AGENT_ORCH_PROJECT_ROOT", Path(__file__).resolve().parent)
+).resolve()
+LOCAL_SESSIONS_DIR = PROJECT_ROOT / "sessions"
+ACPX_SESSIONS_DIR = Path.home() / ".acpx" / "sessions"
+
+
+def _load_index(path: Path) -> dict:
+    if not path.exists():
+        return {"entries": []}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_index(path: Path, index: dict) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2)
+
 
 def remove_all_sessions():
-    """Remove all acpx sessions.
+    """Remove all sessions from both local and acpx stores."""
+    removed = 0
 
-    Returns:
-        bool: True if successful, False otherwise
-    """
+    # --- Local sessions ---
+    local_index_path = LOCAL_SESSIONS_DIR / "index.json"
+    local_index = _load_index(local_index_path)
+    local_entries = local_index.get("entries", [])
+    if local_entries:
+        print(f"\n📋 Local sessions to remove: {len(local_entries)}")
+        for entry in local_entries:
+            print(f"  - {entry.get('name', '(unnamed)')} ({entry.get('agent_harness', '?')})")
+        local_index["entries"] = []
+        _save_index(local_index_path, local_index)
+        removed += len(local_entries)
+        print("  ✓ Local index cleared")
 
-    sessions_path = Path.home() / ".acpx" / "sessions"
-    index_path = sessions_path / "index.json"
+    # --- acpx sessions ---
+    acpx_index_path = ACPX_SESSIONS_DIR / "index.json"
+    acpx_index = _load_index(acpx_index_path)
+    acpx_entries = acpx_index.get("entries", [])
+    if acpx_entries:
+        session_ids = [e["acpxRecordId"] for e in acpx_entries]
+        files_to_delete = []
+        total_size = 0
 
-    if not index_path.exists():
-        print(f"❌ Error: Session index not found at {index_path}")
-        return False
+        print(f"\n📋 acpx sessions to remove: {len(acpx_entries)}")
+        for entry in acpx_entries:
+            name = entry.get("name", "(unnamed)")
+            sid = entry["acpxRecordId"]
+            status = "closed" if entry.get("closed") else "open"
+            print(f"  - {name} [{sid}] ({status})")
 
-    with open(index_path, 'r', encoding='utf-8') as f:
-        index = json.load(f)
+            for suffix in (".json", ".stream.ndjson", ".stream.lock"):
+                fp = ACPX_SESSIONS_DIR / f"{sid}{suffix}"
+                if fp.exists():
+                    size = fp.stat().st_size
+                    total_size += size
+                    files_to_delete.append(fp)
 
-    entries = index.get('entries', [])
-    if not entries:
+        print(f"\n  Total files: {len(files_to_delete)} ({total_size / 1024:.2f} KB)")
+        for fp in files_to_delete:
+            try:
+                fp.unlink()
+            except Exception as e:
+                print(f"  ✗ Failed to delete {fp.name}: {e}")
+                return False
+
+        acpx_index["entries"] = []
+        acpx_index["files"] = [
+            f for f in acpx_index.get("files", [])
+            if not any(f.startswith(sid) for sid in session_ids)
+        ]
+        _save_index(acpx_index_path, acpx_index)
+        removed += len(acpx_entries)
+        print("  ✓ acpx index cleared")
+
+    # Clean stale tmp files
+    for tmp in ACPX_SESSIONS_DIR.glob("*.tmp"):
+        tmp.unlink(missing_ok=True)
+
+    if removed == 0:
         print("ℹ️ No sessions found")
-        return True
-
-    session_ids = [entry['acpxRecordId'] for entry in entries]
-    files_to_delete = []
-    total_size = 0
-
-    print(f"\n📋 Sessions to remove: {len(entries)}")
-    for entry in entries:
-        name = entry.get('name', '(unnamed)')
-        session_id = entry['acpxRecordId']
-        status = "closed" if entry.get('closed') else "open"
-        print(f"  - {name} [{session_id}] ({status})")
-
-        for suffix in (".json", ".stream.ndjson"):
-            file_path = sessions_path / f"{session_id}{suffix}"
-            if file_path.exists():
-                size = file_path.stat().st_size
-                total_size += size
-                files_to_delete.append((file_path, size))
-
-    print(f"\n  Total files: {len(files_to_delete)}")
-    print(f"  Total size: {total_size / 1024:.2f} KB")
-
-    print("\n🗑️  Deleting files...")
-    for file_path, _ in files_to_delete:
-        try:
-            file_path.unlink()
-            print(f"  ✓ Deleted: {file_path.name}")
-        except Exception as e:
-            print(f"  ✗ Failed to delete {file_path.name}: {e}")
-            return False
-
-    print("\n📝 Updating index...")
-    index['entries'] = []
-    index['files'] = [
-        file_name for file_name in index.get('files', [])
-        if not any(file_name.startswith(session_id) for session_id in session_ids)
-    ]
-
-    try:
-        with open(index_path, 'w', encoding='utf-8') as f:
-            json.dump(index, f, indent=2)
-        print("  ✓ Index updated")
-    except Exception as e:
-        print(f"  ✗ Failed to update index: {e}")
-        return False
-
-    print("\n✅ Successfully removed all sessions")
+    else:
+        print(f"\n✅ Removed {removed} sessions total")
     return True
+
 
 def remove_session(session_name):
-    """Remove an acpx session by name
-    
-    Args:
-        session_name: Name of the session to remove
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    
-    # Path to sessions directory
-    sessions_path = Path.home() / ".acpx" / "sessions"
-    index_path = sessions_path / "index.json"
-    
-    if not index_path.exists():
-        print(f"❌ Error: Session index not found at {index_path}")
-        return False
-    
-    # Read the index
-    with open(index_path, 'r', encoding='utf-8') as f:
-        index = json.load(f)
-    
-    # Find the session
-    session_to_remove = None
-    for entry in index['entries']:
-        if entry.get('name') == session_name:
-            session_to_remove = entry
+    """Remove a session by name from local index and/or acpx."""
+
+    # --- Try local index first ---
+    local_index_path = LOCAL_SESSIONS_DIR / "index.json"
+    local_index = _load_index(local_index_path)
+    local_match = [e for e in local_index["entries"] if e.get("name") == session_name]
+
+    if local_match:
+        local_index["entries"] = [e for e in local_index["entries"] if e.get("name") != session_name]
+        _save_index(local_index_path, local_index)
+        print(f"  ✓ Removed '{session_name}' from local index")
+
+    # --- Try acpx index ---
+    acpx_index_path = ACPX_SESSIONS_DIR / "index.json"
+    acpx_index = _load_index(acpx_index_path)
+    acpx_match = None
+    for entry in acpx_index["entries"]:
+        if entry.get("name") == session_name:
+            acpx_match = entry
             break
-    
-    if not session_to_remove:
-        print(f"❌ Error: Session '{session_name}' not found")
+
+    if acpx_match:
+        sid = acpx_match["acpxRecordId"]
+        for suffix in (".json", ".stream.ndjson", ".stream.lock"):
+            fp = ACPX_SESSIONS_DIR / f"{sid}{suffix}"
+            if fp.exists():
+                fp.unlink()
+        acpx_index["entries"] = [e for e in acpx_index["entries"] if e["acpxRecordId"] != sid]
+        acpx_index["files"] = [f for f in acpx_index.get("files", []) if not f.startswith(sid)]
+        _save_index(acpx_index_path, acpx_index)
+        print(f"  ✓ Removed '{session_name}' from acpx index")
+
+    if not local_match and not acpx_match:
+        print(f"❌ Session '{session_name}' not found")
         return False
-    
-    # Display session info
-    name = session_to_remove.get('name', '(unnamed)')
-    session_id = session_to_remove['acpxRecordId']
-    status = "closed" if session_to_remove.get('closed') else "open"
-    
-    print(f"\n📋 Session to remove:")
-    print(f"  Name: {name}")
-    print(f"  ID: {session_id}")
-    print(f"  Status: {status}")
-    print(f"  Path: {session_to_remove.get('cwd', 'N/A')}")
-    print(f"  Last used: {session_to_remove.get('lastUsedAt', 'N/A')}")
-    
-    # Find files to delete
-    json_file = sessions_path / f"{session_id}.json"
-    stream_file = sessions_path / f"{session_id}.stream.ndjson"
-    
-    files_to_delete = []
-    total_size = 0
-    
-    if json_file.exists():
-        size = json_file.stat().st_size
-        total_size += size
-        files_to_delete.append((json_file, size))
-        print(f"\n  📄 {json_file.name} ({size / 1024:.2f} KB)")
-    
-    if stream_file.exists():
-        size = stream_file.stat().st_size
-        total_size += size
-        files_to_delete.append((stream_file, size))
-        print(f"  📄 {stream_file.name} ({size / 1024:.2f} KB)")
-    
-    print(f"\n  Total size: {total_size / 1024:.2f} KB")
-    
-    # Delete files
-    print("\n🗑️  Deleting files...")
-    for file_path, _ in files_to_delete:
-        try:
-            file_path.unlink()
-            print(f"  ✓ Deleted: {file_path.name}")
-        except Exception as e:
-            print(f"  ✗ Failed to delete {file_path.name}: {e}")
-            return False
-    
-    # Update index.json
-    print("\n📝 Updating index...")
-    
-    # Remove from entries
-    index['entries'] = [e for e in index['entries'] if e['acpxRecordId'] != session_id]
-    
-    # Remove from files list
-    index['files'] = [f for f in index['files'] if not f.startswith(session_id)]
-    
-    # Save updated index
-    try:
-        with open(index_path, 'w', encoding='utf-8') as f:
-            json.dump(index, f, indent=2)
-        print("  ✓ Index updated")
-    except Exception as e:
-        print(f"  ✗ Failed to update index: {e}")
-        return False
-    
-    print(f"\n✅ Successfully removed session '{name}'")
+
+    print(f"\n✅ Successfully removed session '{session_name}'")
     return True
 
+
 if __name__ == "__main__":
-
-    # Uncommment the following lines to remove a specific session by name
-    # session_name = input("Enter the name of the session to remove: ")
-    # remove_session(session_name)
-
-    # Uncommment the following line to remove all sessions
     remove_all_sessions()

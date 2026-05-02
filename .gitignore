@@ -4,4 +4,6 @@
 .vscode
 guides/
 __pycache__/
+sessions/*
+!sessions/.gitkeep
 .gitignore

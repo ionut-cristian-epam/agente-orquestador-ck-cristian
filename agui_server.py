@@ -8,6 +8,7 @@ Endpoints:
 """
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -40,10 +41,14 @@ from launch_sessions import Session
 from acp_to_agui import map_acp_event
 from available_models import SUPPORTED_MODELS_OPENCODE, SUPPORTED_MODELS_COPILOT_CLI
 
-ACPX_SESSIONS_DIR = Path.home() / ".acpx" / "sessions"
 PROJECT_ROOT = Path(
     os.environ.get("AGENT_ORCH_PROJECT_ROOT", Path(__file__).resolve().parent)
 ).resolve()
+SESSIONS_DIR = PROJECT_ROOT / "sessions"
+SESSIONS_DIR.mkdir(exist_ok=True)
+
+# Legacy fallback: acpx still writes to ~/.acpx/sessions
+ACPX_SESSIONS_DIR = Path.home() / ".acpx" / "sessions"
 
 _sessions: dict[str, Session] = {}
 
@@ -73,6 +78,33 @@ class CreateSessionRequest(BaseModel):
     LLM: Optional[str] = None
 
 
+def _load_local_index() -> dict:
+    index_path = SESSIONS_DIR / "index.json"
+    if not index_path.exists():
+        return {"schema": "orchestrator.session-index.v1", "entries": []}
+    with open(index_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_local_index(index: dict) -> None:
+    index_path = SESSIONS_DIR / "index.json"
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2)
+
+
+def _add_to_local_index(entry: dict) -> None:
+    index = _load_local_index()
+    index["entries"] = [e for e in index["entries"] if e.get("name") != entry["name"]]
+    index["entries"].append(entry)
+    _save_local_index(index)
+
+
+def _remove_from_local_index(name: str) -> None:
+    index = _load_local_index()
+    index["entries"] = [e for e in index["entries"] if e.get("name") != name]
+    _save_local_index(index)
+
+
 def _load_acpx_index() -> dict:
     index_path = ACPX_SESSIONS_DIR / "index.json"
     if not index_path.exists():
@@ -81,7 +113,10 @@ def _load_acpx_index() -> dict:
         return json.load(f)
 
 
-def _find_acpx_entry(name: str) -> Optional[dict]:
+def _find_session_entry(name: str) -> Optional[dict]:
+    for entry in _load_local_index().get("entries", []):
+        if entry.get("name") == name and not entry.get("closed"):
+            return entry
     for entry in _load_acpx_index().get("entries", []):
         if (
             entry.get("name") == name
@@ -93,18 +128,20 @@ def _find_acpx_entry(name: str) -> Optional[dict]:
 
 
 def _attach_existing(name: str) -> Optional[Session]:
-    entry = _find_acpx_entry(name)
+    entry = _find_session_entry(name)
     if not entry:
         return None
     cwd = entry.get("cwd")
     cmd = entry.get("agentCommand", "") or ""
-    harness = next((h for h in KNOWN_HARNESSES if h in cmd), "opencode")
+    harness = entry.get("agent_harness") or next(
+        (h for h in KNOWN_HARNESSES if h in cmd), "opencode"
+    )
 
     sess = Session.__new__(Session)
     sess.agent_harness = harness
     sess.name = name
     sess.working_dir = cwd
-    sess.LLM = None
+    sess.LLM = entry.get("LLM")
     return sess
 
 
@@ -139,20 +176,32 @@ app.add_middleware(
 
 @app.get("/sessions")
 def list_sessions():
-    index = _load_acpx_index()
-    return {
-        "projectRoot": str(PROJECT_ROOT),
-        "registered": list(_sessions.keys()),
-        "acpx": [
-            {
+    local = _load_local_index()
+    acpx = _load_acpx_index()
+    seen = set()
+    merged = []
+    for e in local.get("entries", []):
+        seen.add(e.get("name"))
+        merged.append({
+            "name": e.get("name"),
+            "cwd": e.get("cwd"),
+            "closed": e.get("closed", False),
+            "lastUsedAt": e.get("lastUsedAt"),
+            "agent_harness": e.get("agent_harness", "opencode"),
+            "LLM": e.get("LLM"),
+        })
+    for e in acpx.get("entries", []):
+        if e.get("name") not in seen and _is_inside_project(e.get("cwd")):
+            merged.append({
                 "name": e.get("name"),
                 "cwd": e.get("cwd"),
                 "closed": e.get("closed", False),
                 "lastUsedAt": e.get("lastUsedAt"),
-            }
-            for e in index.get("entries", [])
-            if _is_inside_project(e.get("cwd"))
-        ],
+            })
+    return {
+        "projectRoot": str(PROJECT_ROOT),
+        "registered": list(_sessions.keys()),
+        "acpx": merged,
     }
 
 
@@ -170,6 +219,15 @@ def create_session(req: CreateSessionRequest):
         kwargs["LLM"] = req.LLM
     sess = Session(**kwargs)
     _sessions[req.name] = sess
+    _add_to_local_index({
+        "name": req.name,
+        "agent_harness": req.agent_harness,
+        "cwd": req.working_dir,
+        "LLM": req.LLM,
+        "closed": False,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "lastUsedAt": datetime.now(timezone.utc).isoformat(),
+    })
     return {"status": "created", "name": req.name}
 
 
@@ -190,7 +248,9 @@ def delete_session(name: str):
     try:
         sess.close_session()
     except Exception as e:
+        _remove_from_local_index(name)
         return {"status": "closed_with_errors", "error": str(e)}
+    _remove_from_local_index(name)
     return {"status": "closed"}
 
 
