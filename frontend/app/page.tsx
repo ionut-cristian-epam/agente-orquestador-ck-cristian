@@ -425,6 +425,8 @@ export default function Home() {
   // Filter panels to only those that still exist
   const activePanels = openPanels.filter((n) => n in agentMap);
 
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
   const [broadcastError, setBroadcastError] = useState<string | null>(null);
 
   const handleBroadcast = async () => {
@@ -463,11 +465,25 @@ export default function Home() {
   };
 
   return (
-    <div className="grid grid-cols-[360px_1fr] h-screen">
+    <div className="flex h-screen">
       {/* ---- Sidebar ---- */}
-      <aside className="border-r border-zinc-200 dark:border-zinc-800 p-5 overflow-y-auto flex flex-col">
-        <h1 className="text-lg font-semibold mb-3">Agent Sessions</h1>
+      <aside
+        className={`border-r border-zinc-200 dark:border-zinc-800 overflow-y-auto flex flex-col shrink-0 transition-[width] duration-200 ${
+          sidebarOpen ? "w-[360px] p-5" : "w-10 py-2 px-1"
+        }`}
+      >
+        <div className={`flex items-center mb-3 ${sidebarOpen ? "justify-between" : "justify-center"}`}>
+          {sidebarOpen && <h1 className="text-lg font-semibold whitespace-nowrap">Agent Sessions</h1>}
+          <button
+            onClick={() => setSidebarOpen((v) => !v)}
+            className="px-2 py-1 text-sm rounded hover:bg-zinc-200 dark:hover:bg-zinc-800 shrink-0"
+            title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+          >
+            {sidebarOpen ? "«" : "»"}
+          </button>
+        </div>
 
+        {!sidebarOpen ? null : <>
         <div className="flex gap-2 mb-3">
           <button
             onClick={refresh}
@@ -660,10 +676,11 @@ export default function Home() {
             )}
           </form>
         )}
+        </>}
       </aside>
 
       {/* ---- Multi-panel chat area ---- */}
-      <main className="flex flex-col min-h-0 overflow-hidden">
+      <main className="flex flex-col min-h-0 min-w-0 flex-1 overflow-hidden">
         {activePanels.length > 0 ? (
           <div
             className="flex-1 grid min-h-0 overflow-hidden"
