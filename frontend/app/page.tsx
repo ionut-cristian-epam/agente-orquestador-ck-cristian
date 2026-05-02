@@ -152,6 +152,29 @@ function BroadcastReceiver({
 }
 
 /* ------------------------------------------------------------------ */
+/*  Clear chat — wipe agent messages + localStorage                    */
+/* ------------------------------------------------------------------ */
+
+function ClearChatButton({ agentId, threadId }: { agentId: string; threadId: string }) {
+  const { agent } = useAgent({ agentId, threadId });
+
+  const handleClear = () => {
+    agent.setMessages([]);
+    localStorage.removeItem(STORAGE_KEY_PREFIX + agentId);
+  };
+
+  return (
+    <button
+      onClick={handleClear}
+      className="text-xs opacity-50 hover:opacity-100 px-1.5 py-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800"
+      title="Clear chat history"
+    >
+      Clear
+    </button>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Chat panel — each has its own CopilotKitProvider so they stream    */
 /*  independently from different backend sessions.                     */
 /* ------------------------------------------------------------------ */
@@ -192,13 +215,16 @@ function ChatPanel({
                 <span className="text-xs font-normal opacity-60 ml-1">{cfg.label}</span>
               )}
             </span>
-            <button
-              onClick={onClose}
-              className="text-xs opacity-50 hover:opacity-100 px-1.5 py-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800"
-              title="Close panel"
-            >
-              ✕
-            </button>
+            <span className="flex items-center gap-1">
+              <ClearChatButton agentId={name} threadId={threadId} />
+              <button
+                onClick={onClose}
+                className="text-xs opacity-50 hover:opacity-100 px-1.5 py-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800"
+                title="Close panel"
+              >
+                ✕
+              </button>
+            </span>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto">
             <CopilotChat
