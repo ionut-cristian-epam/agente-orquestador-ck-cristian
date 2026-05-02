@@ -1,13 +1,17 @@
-import subprocess
-import os
+import asyncio
 import json
+import os
+import subprocess
 import warnings
+from typing import AsyncIterator
+
 warnings.filterwarnings("ignore")
 
 from available_models import SUPPORTED_MODELS_OPENCODE, SUPPORTED_MODELS_COPILOT_CLI
 
+
 class Session:
-    def __init__(self, agent_harness,name,working_dir, LLM="opencode/nemotron-3-super-free",capture_output=True):
+    def __init__(self, agent_harness, name, working_dir, LLM="opencode/big-pickle", capture_output=True):
         self.agent_harness = agent_harness
         self.name = name
         self.working_dir = working_dir
@@ -18,7 +22,6 @@ class Session:
         if self.agent_harness == "copilot":
             self._set_model_copilot()
 
-    
     def _set_model_in_config(self):
         if self.agent_harness == "opencode":
             SUPPORTED_MODELS = SUPPORTED_MODELS_OPENCODE
@@ -42,21 +45,21 @@ class Session:
     def _run(self, cmd, capture_output=False):
         output_lines = []
         with subprocess.Popen(
-            cmd, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.STDOUT, 
-            text=True, 
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
             shell=True,
-            cwd=self.working_dir
+            cwd=self.working_dir,
         ) as proc:
             for line in proc.stdout:
                 if capture_output:
                     output_lines.append(line)
                 else:
                     print(line, end="")
-        
+
         return ''.join(output_lines) if capture_output else None
-    
+
     def _set_model_copilot(self):
         if self.LLM not in SUPPORTED_MODELS_COPILOT_CLI:
             raise ValueError(
@@ -65,10 +68,13 @@ class Session:
             )
         print(f"\n--- Setting model for Copilot CLI session '{self.name}' to '{self.LLM}' ---")
         self._run(["acpx", self.agent_harness, "-s", self.name, "set", "model", self.LLM])
-    
-    def create_session(self,capture_output=True):
-        print(f"\n--- Creating session: {self.name} (in {self.working_dir}) ---")
-        self._run(["acpx", self.agent_harness, "sessions", "new", "--name", self.name],capture_output=capture_output)
+
+    def create_session(self, capture_output=True):
+        print(f"\n--- Ensuring session: {self.name} (in {self.working_dir}) ---")
+        self._run(
+            ["acpx", self.agent_harness, "sessions", "ensure", "--name", self.name],
+            capture_output=capture_output,
+        )
 
     def _filter_output(self, raw_output):
         lines = raw_output.splitlines()
@@ -82,6 +88,73 @@ class Session:
         if capture_output and raw is not None:
             return self._filter_output(raw)
         return raw
+
+    async def stream_prompt(self, prompt: str) -> AsyncIterator[dict]:
+        """Stream ACP JSON-RPC events from acpx as parsed dicts.
+
+        Uses --format json (NDJSON over stdout). Prompt sent via stdin (-f -)
+        to avoid any shell-quoting concerns.
+
+        Runs the subprocess in a thread to avoid Windows SelectorEventLoop
+        limitations with asyncio.create_subprocess_*.
+        """
+        import queue as _queue
+
+        cmd = [
+            "acpx", "--format", "json",
+            self.agent_harness, "-s", self.name,
+            "-f", "-",
+        ]
+
+        q: _queue.Queue[dict | None] = _queue.Queue()
+
+        def _run_in_thread():
+            proc = subprocess.Popen(
+                subprocess.list2cmdline(cmd),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
+                shell=True,
+                cwd=self.working_dir,
+            )
+            assert proc.stdin and proc.stdout
+            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.flush()
+            proc.stdin.close()
+
+            for raw_line in proc.stdout:
+                try:
+                    obj = json.loads(raw_line.decode("utf-8", errors="replace"))
+                    q.put(obj)
+                except json.JSONDecodeError:
+                    continue
+            proc.wait()
+            q.put(None)  # sentinel
+
+        loop = asyncio.get_event_loop()
+        fut = loop.run_in_executor(None, _run_in_thread)
+
+        _sentinel = object()
+
+        def _poll_queue():
+            try:
+                return q.get(block=True, timeout=0.5)
+            except _queue.Empty:
+                return _sentinel
+
+        while True:
+            item = await loop.run_in_executor(None, _poll_queue)
+            if item is _sentinel:
+                if fut.done():
+                    break
+                continue
+            if item is None:
+                break
+            yield item
+
+        await fut  # propagate any thread exception
+
     def close_session(self):
         print(f"\n--- Closing session: {self.name} ---")
         self._run(["acpx", self.agent_harness, "sessions", "close", self.name])
@@ -93,23 +166,10 @@ if __name__ == "__main__":
         agent_harness="opencode",
         name="agent_debugging",
         working_dir=os.path.join(os.path.dirname(__file__), "agent_debugging"),
-        LLM= "opencode/gpt-5-nano",
-        capture_output=True
+        LLM="opencode/gpt-5-nano",
+        capture_output=True,
     )
-    deb = debugging_session.prompt_session("What is your LLM",capture_output=True)
+    deb = debugging_session.prompt_session("What is your LLM", capture_output=True)
     print(f"Debugging Session Output:\n{deb}")
-    
 
-    # documentation_session = Session(
-    #     name="agent_documentation",
-    #     working_dir=os.path.join(os.path.dirname(__file__), "agent_documentation"),
-    #     LLM= "amazon-bedrock/moonshot.kimi-k2-thinking",
-    #     capture_output=True
-        
-      
-    # )
-    # doc = documentation_session.prompt_session("What is your LLM",capture_output=True)
-    # print(f"Documentation Session Output:\n{doc}")
     debugging_session.close_session()
-    # documentation_session.close_session()
-    
