@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import { CopilotKitProvider, CopilotChat } from "@copilotkit/react-core/v2";
+import {
+  CopilotKitProvider,
+  CopilotChat,
+  CopilotChatConfigurationProvider,
+  useAgent,
+  useCopilotKit,
+} from "@copilotkit/react-core/v2";
 import { HttpAgent } from "@ag-ui/client";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
@@ -103,6 +109,49 @@ function makePersistentAgent(base: HttpAgent, sessionName: string): HttpAgent {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Broadcast — inject a prompt into a CopilotChat panel               */
+/* ------------------------------------------------------------------ */
+
+type BroadcastSendFn = (text: string) => Promise<void>;
+
+const THREAD_KEY_PREFIX = "chat_thread:";
+
+function getOrCreateThreadId(sessionName: string): string {
+  const key = THREAD_KEY_PREFIX + sessionName;
+  const existing = localStorage.getItem(key);
+  if (existing) return existing;
+  const id = crypto.randomUUID();
+  localStorage.setItem(key, id);
+  return id;
+}
+
+function BroadcastReceiver({
+  agentId,
+  threadId,
+  onRegister,
+}: {
+  agentId: string;
+  threadId: string;
+  onRegister: (send: BroadcastSendFn) => void;
+}) {
+  const { agent } = useAgent({ agentId, threadId });
+  const { copilotkit } = useCopilotKit();
+
+  useEffect(() => {
+    onRegister(async (text: string) => {
+      agent.addMessage({
+        id: crypto.randomUUID(),
+        role: "user" as const,
+        content: text,
+      });
+      await copilotkit.runAgent({ agent });
+    });
+  }, [agent, copilotkit, onRegister]);
+
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Chat panel — each has its own CopilotKitProvider so they stream    */
 /*  independently from different backend sessions.                     */
 /* ------------------------------------------------------------------ */
@@ -112,45 +161,53 @@ function ChatPanel({
   agent,
   status,
   onClose,
+  onBroadcastReady,
 }: {
   name: string;
   agent: HttpAgent;
   status: SessionStatus;
   onClose: () => void;
+  onBroadcastReady?: (send: BroadcastSendFn) => void;
 }) {
   const persistentAgent = useMemo(() => makePersistentAgent(agent, name), [agent, name]);
   const agents = useMemo(() => ({ [name]: persistentAgent }), [name, persistentAgent]);
   const cfg = STATUS_CONFIG[status];
+  const threadId = useMemo(() => getOrCreateThreadId(name), [name]);
 
   return (
     <CopilotKitProvider key={name} agents__unsafe_dev_only={agents}>
-      <div className="flex flex-col h-full min-w-0 overflow-hidden border-r last:border-r-0 border-zinc-200 dark:border-zinc-800">
-        <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 shrink-0">
-          <span className="font-mono text-sm font-medium truncate flex items-center gap-1.5">
-            <span
-              className={`inline-block w-2 h-2 rounded-full shrink-0 ${cfg.color} ${cfg.pulse ? "animate-pulse" : ""}`}
-              title={cfg.label}
+      <CopilotChatConfigurationProvider agentId={name} threadId={threadId}>
+        {onBroadcastReady && (
+          <BroadcastReceiver agentId={name} threadId={threadId} onRegister={onBroadcastReady} />
+        )}
+        <div className="flex flex-col h-full min-w-0 overflow-hidden border-r last:border-r-0 border-zinc-200 dark:border-zinc-800">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 shrink-0">
+            <span className="font-mono text-sm font-medium truncate flex items-center gap-1.5">
+              <span
+                className={`inline-block w-2 h-2 rounded-full shrink-0 ${cfg.color} ${cfg.pulse ? "animate-pulse" : ""}`}
+                title={cfg.label}
+              />
+              {name}
+              {status !== "idle" && (
+                <span className="text-xs font-normal opacity-60 ml-1">{cfg.label}</span>
+              )}
+            </span>
+            <button
+              onClick={onClose}
+              className="text-xs opacity-50 hover:opacity-100 px-1.5 py-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800"
+              title="Close panel"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <CopilotChat
+              agentId={name}
+              labels={{ chatInputPlaceholder: `Message ${name}...` }}
             />
-            {name}
-            {status !== "idle" && (
-              <span className="text-xs font-normal opacity-60 ml-1">{cfg.label}</span>
-            )}
-          </span>
-          <button
-            onClick={onClose}
-            className="text-xs opacity-50 hover:opacity-100 px-1.5 py-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800"
-            title="Close panel"
-          >
-            ✕
-          </button>
+          </div>
         </div>
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <CopilotChat
-            agentId={name}
-            labels={{ chatInputPlaceholder: `Message ${name}...` }}
-          />
-        </div>
-      </div>
+      </CopilotChatConfigurationProvider>
     </CopilotKitProvider>
   );
 }
@@ -188,6 +245,15 @@ export default function Home() {
 
   // Broadcast prompt
   const [broadcastText, setBroadcastText] = useState("");
+  const [broadcasting, setBroadcasting] = useState(false);
+  const broadcastFnsRef = useRef<Map<string, BroadcastSendFn>>(new Map());
+
+  const registerBroadcast = useCallback((name: string) => {
+    return (send: BroadcastSendFn) => {
+      broadcastFnsRef.current.set(name, send);
+    };
+  }, []);
+
 
   // Session status polling
   const [statusMap, setStatusMap] = useState<Record<string, SessionStatus>>({});
@@ -298,6 +364,22 @@ export default function Home() {
 
   // Filter panels to only those that still exist
   const activePanels = openPanels.filter((n) => n in agentMap);
+
+  const handleBroadcast = async () => {
+    const text = broadcastText.trim();
+    if (!text || activePanels.length === 0) return;
+    setBroadcasting(true);
+    setBroadcastText("");
+    try {
+      const promises = activePanels
+        .map((name) => broadcastFnsRef.current.get(name))
+        .filter(Boolean)
+        .map((fn) => fn!(text).catch(console.error));
+      await Promise.allSettled(promises);
+    } finally {
+      setBroadcasting(false);
+    }
+  };
 
   return (
     <div className="grid grid-cols-[360px_1fr] h-screen">
@@ -436,6 +518,38 @@ export default function Home() {
             </button>
           </div>
         )}
+
+        {/* Broadcast prompt */}
+        {activePanels.length > 1 && (
+          <form
+            onSubmit={(e) => { e.preventDefault(); handleBroadcast(); }}
+            className="mt-auto pt-3 border-t border-zinc-200 dark:border-zinc-800 space-y-2"
+          >
+            <label className="text-xs font-medium opacity-70">
+              Broadcast to {activePanels.length} panels
+            </label>
+            <textarea
+              rows={2}
+              placeholder="Send same prompt to all open panels..."
+              value={broadcastText}
+              onChange={(e) => setBroadcastText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault();
+                  handleBroadcast();
+                }
+              }}
+              className="w-full px-2 py-1.5 text-sm border border-zinc-300 dark:border-zinc-700 rounded bg-transparent resize-none"
+            />
+            <button
+              type="submit"
+              disabled={broadcasting || !broadcastText.trim()}
+              className="w-full px-3 py-1.5 text-sm rounded bg-black text-white dark:bg-white dark:text-black hover:opacity-80 disabled:opacity-50"
+            >
+              {broadcasting ? "Sending..." : "Broadcast (Ctrl+Enter)"}
+            </button>
+          </form>
+        )}
       </aside>
 
       {/* ---- Multi-panel chat area ---- */}
@@ -454,6 +568,7 @@ export default function Home() {
                 agent={agentMap[name]}
                 status={statusMap[name] || "idle"}
                 onClose={() => closePanel(name)}
+                onBroadcastReady={registerBroadcast(name)}
               />
             ))}
           </div>
