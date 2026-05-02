@@ -1,211 +1,348 @@
 # Agent Harness Orchestrator
 
-Python-native orchestrator for managing parallel AI coding agent sessions over the [Agent Client Protocol (ACP)](https://agentcommunicationprotocol.dev).
+Orquestador de sesiones de agentes IA de codificación en paralelo, construido sobre el [Agent Client Protocol (ACP)](https://agentcommunicationprotocol.dev) y el protocolo [AG-UI](https://docs.ag-ui.com) de CopilotKit.
 
-Instead of wrapping terminals and scraping ANSI output, this project talks to coding agents through [`acpx`](https://www.npmjs.com/package/acpx) — a headless CLI client that converts ACP protocol messages into structured, typed interactions. One orchestrator, many agents.
-
----
-
-## Features
-
-- **Multi-agent sessions** — Run multiple agents in parallel, each with its own model, working directory, and config
-- **90+ supported models** — AWS Bedrock (Claude, Llama, Mistral, Qwen, DeepSeek, ...) and OpenCode free tier
-- **15+ agent harnesses** — OpenCode, Claude Code, Codex, Gemini, Cursor, Copilot, Kiro, and more via `acpx`
-- **Structured output** — Typed ACP messages (thinking, tool calls, diffs) instead of raw text
-- **Persistent sessions** — Sessions survive across invocations, crash-recover automatically
-- **Dynamic model config** — Model is validated and injected into `opencode.json` at session creation
+En lugar de capturar terminales y parsear salida ANSI, este proyecto se comunica con agentes de codificación a través de [`acpx`](https://www.npmjs.com/package/acpx) — un cliente CLI headless que convierte mensajes del protocolo ACP en interacciones estructuradas y tipadas.
 
 ---
 
-## Prerequisites
+## Tecnologías Clave
 
-| Requirement | Version | Install |
-|-------------|---------|---------|
-| Python | 3.8+ | [python.org](https://python.org/) |
+### ACP (Agent Client Protocol)
+
+Protocolo abierto de comunicación entre clientes y agentes IA. Define un formato estándar JSON-RPC para enviar prompts, recibir respuestas, notificar sobre pensamiento del agente, invocaciones de herramientas y sus resultados. Es agnóstico al agente: cualquier agente que implemente ACP puede ser controlado por cualquier cliente ACP. [Especificación](https://agentcommunicationprotocol.dev)
+
+### acpx
+
+Cliente CLI headless para el protocolo ACP. Actúa como intermediario entre nuestro orquestador y los agentes de codificación (OpenCode, Claude Code, Codex, etc.). En lugar de interactuar con la interfaz de terminal del agente, `acpx` expone los mensajes ACP como JSON-RPC sobre stdout/stdin. Permite crear sesiones, enviar prompts y recibir eventos estructurados (texto, pensamiento, tool calls) sin interfaz gráfica. [npm](https://www.npmjs.com/package/acpx)
+
+### AG-UI (Agent-User Interaction Protocol)
+
+Protocolo de CopilotKit que define cómo un frontend se comunica con agentes backend via streaming (SSE). Define tipos de eventos como `RunStartedEvent`, `TextMessageChunkEvent`, `ReasoningMessageChunkEvent`, `ToolCallStartEvent`, etc. El frontend envía un `POST` con los mensajes del chat, y el backend responde con un stream de eventos que el frontend renderiza en tiempo real. [Documentación](https://docs.ag-ui.com)
+
+### CopilotKit
+
+Framework React de código abierto para construir interfaces de chat con agentes IA. Proporciona componentes como `CopilotChat` (UI de chat completa), providers como `CopilotKitProvider` (registro de agentes) y hooks como `useAgent` (acceso programático al agente). En este proyecto, CopilotKit v2 consume los eventos AG-UI que genera nuestro backend FastAPI. [Web](https://copilotkit.ai)
+
+### OpenCode
+
+Agente de codificación open-source y multi-provider. Es el harness por defecto del orquestador. Soporta múltiples proveedores de LLM (NagaAI, OpenCode Zen, Amazon Bedrock) configurables via `opencode.json`. Se ejecuta a través de `acpx opencode`. [npm](https://www.npmjs.com/package/opencode-ai)
+
+### FastAPI
+
+Framework web Python de alto rendimiento para construir APIs. En este proyecto, sirve como puente entre el protocolo AG-UI (que espera el frontend CopilotKit) y el protocolo ACP (que hablan los agentes via acpx). Gestiona sesiones, traduce eventos y emite SSE. [Web](https://fastapi.tiangolo.com)
+
+### Next.js
+
+Framework React para aplicaciones web. Usado aquí como base del frontend (v16). Sirve la interfaz multi-panel de chat y se comunica con el backend via fetch/SSE. [Web](https://nextjs.org)
+
+---
+
+## Arquitectura General
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        FRONTEND (Next.js)                       │
+│                                                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                      │
+│  │ ChatPanel │  │ ChatPanel │  │ ChatPanel │  ← Paneles lado a  │
+│  │ (sesión A)│  │ (sesión B)│  │ (sesión C)│    lado             │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘                      │
+│       │              │              │                            │
+│  CopilotKitProvider + HttpAgent (AG-UI)                         │
+│       │              │              │                            │
+└───────┼──────────────┼──────────────┼───────────────────────────┘
+        │ SSE          │ SSE          │ SSE
+        ▼              ▼              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    BACKEND (FastAPI + Python)                    │
+│                                                                 │
+│  POST /agent/{name}  ← Endpoint AG-UI (streaming SSE)           │
+│  GET  /sessions      ← Listar sesiones (local + acpx)           │
+│  POST /sessions      ← Crear nueva sesión                       │
+│  DELETE /sessions/{n} ← Cerrar sesión                           │
+│  GET /sessions/status ← Estado de actividad por sesión          │
+│  GET /models/{harness}← Modelos disponibles por harness         │
+│                                                                 │
+│  agui_server.py ──→ launch_sessions.py ──→ acpx CLI             │
+│       │                                       │                 │
+│  acp_to_agui.py                               │                 │
+│  (traduce ACP → AG-UI)                        ▼                 │
+│                                          Agente (opencode,      │
+│                                          claude, codex, etc.)   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Flujo de una conversación
+
+1. **Usuario** escribe un mensaje en un `ChatPanel` del frontend
+2. **CopilotKit** envía un `POST /agent/{nombre}` al backend via `HttpAgent` (protocolo AG-UI)
+3. **`agui_server.py`** extrae el texto del usuario y llama a `session.stream_prompt()`
+4. **`launch_sessions.py`** ejecuta `acpx --format json {harness} -s {nombre} -f -` pasando el prompt por stdin
+5. **`acpx`** envía el prompt al agente (opencode, claude, etc.) y retransmite eventos ACP como NDJSON por stdout
+6. **`acp_to_agui.py`** traduce cada evento ACP (`agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`) a eventos AG-UI (`TextMessageChunkEvent`, `ReasoningMessageChunkEvent`, `ToolCallChunkEvent`, etc.)
+7. **`agui_server.py`** gestiona el ciclo de vida de los eventos (start/content/end para reasoning y tool calls) y los envía como SSE al frontend
+8. **CopilotKit** renderiza los mensajes, el pensamiento del agente y las tool calls en el chat
+
+---
+
+## Integración CopilotKit + AG-UI
+
+Este proyecto usa [CopilotKit](https://copilotkit.ai) v2 con el protocolo [AG-UI](https://docs.ag-ui.com) para conectar el frontend con agentes backend personalizados.
+
+### Paquetes utilizados
+
+| Paquete | Versión | Propósito |
+|---------|---------|-----------|
+| `@copilotkit/react-core` | ^1.56.4 | Componentes React y hooks para chat con agentes |
+| `@copilotkit/react-ui` | ^1.56.4 | Estilos CSS del chat |
+| `@ag-ui/client` | ^0.0.52 | `HttpAgent` — cliente que conecta con endpoints AG-UI |
+| `@ag-ui/core` | ^0.0.52 | Tipos de eventos AG-UI (backend Python) |
+| `ag-ui-protocol` | ^0.1.10 | Tipos y `EventEncoder` para el backend Python |
+
+### Componentes y hooks de CopilotKit usados
+
+| Componente / Hook | Qué hace | Dónde se usa |
+|-------------------|----------|--------------|
+| **`CopilotKitProvider`** | Proveedor raíz que registra los agentes. Cada `ChatPanel` tiene su propio provider para que las sesiones streamen independientemente. | `ChatPanel` — envuelve cada panel de chat |
+| **`CopilotChat`** | Componente de interfaz de chat completo (input, mensajes, thinking, tool calls). Renderiza la conversación con el agente. | `ChatPanel` — dentro de cada panel |
+| **`CopilotChatConfigurationProvider`** | Configura qué agente (`agentId`) y qué hilo (`threadId`) usa un chat. | `ChatPanel` — envuelve `CopilotChat` y `BroadcastReceiver` |
+| **`useCopilotChatConfiguration`** | Hook que lee la configuración del chat actual (agentId, threadId). | `BroadcastReceiver`, `ClearChatButton` — para obtener el agente activo |
+| **`useAgent`** | Hook que devuelve la instancia del agente para un agentId/threadId dado. Permite acceder a `agent.addMessage()`, `agent.setMessages()`. | `BroadcastReceiver`, `ClearChatButton` — para enviar mensajes programáticamente o limpiar el chat |
+| **`useCopilotKit`** | Hook que da acceso al runtime de CopilotKit. Permite ejecutar `copilotkit.runAgent()` manualmente. | `BroadcastReceiver` — para disparar el agente tras inyectar un mensaje de broadcast |
+
+### Componente AG-UI
+
+| Clase | Qué hace | Dónde se usa |
+|-------|----------|--------------|
+| **`HttpAgent`** | Cliente HTTP que implementa el protocolo AG-UI. Se conecta a un endpoint backend (`/agent/{nombre}`) y gestiona el streaming SSE. | `Home` — se crea un `HttpAgent` por cada sesión conocida, apuntando a `http://localhost:8000/agent/{nombre}` |
+
+### Cómo se conectan
+
+```
+CopilotKitProvider
+  ├── agents__unsafe_dev_only = { "mi_sesion": HttpAgent }
+  │
+  └── CopilotChatConfigurationProvider (agentId="mi_sesion")
+       │
+       ├── CopilotChat → renderiza la UI del chat
+       │     └── al enviar mensaje → HttpAgent.run() → POST /agent/mi_sesion
+       │
+       └── BroadcastReceiver (opcional)
+             └── inyecta mensajes programáticamente via useAgent + useCopilotKit
+```
+
+**Nota:** `agents__unsafe_dev_only` es una API de desarrollo de CopilotKit v2 que permite registrar agentes directamente sin pasar por CopilotKit Cloud. Los `HttpAgent` de AG-UI apuntan directamente a nuestro backend FastAPI.
+
+---
+
+## Estructura del Proyecto
+
+```
+agent-harness-orchestrator/
+├── backend/
+│   ├── agui_server.py          # Servidor FastAPI: endpoints AG-UI, gestión de sesiones
+│   ├── launch_sessions.py      # Clase Session: crear/prompt/stream/cerrar via acpx
+│   ├── acp_to_agui.py          # Traductor ACP JSON-RPC → eventos AG-UI
+│   ├── available_models.py     # Listas de modelos soportados (OpenCode + Copilot CLI)
+│   ├── remove_session.py       # Utilidad de limpieza de sesiones
+│   ├── requirements.txt        # Dependencias Python
+│   ├── pytest.ini              # Configuración pytest
+│   └── tests/                  # Tests unitarios
+│       ├── test_acp_to_agui.py
+│       ├── test_agui_server.py
+│       ├── test_session.py
+│       └── test_remove_session.py
+├── frontend/
+│   ├── app/
+│   │   ├── page.tsx            # UI principal: sidebar + paneles de chat multi-sesión
+│   │   ├── layout.tsx          # Layout raíz Next.js
+│   │   └── globals.css         # Estilos globales (Tailwind)
+│   └── package.json
+├── sessions/                   # Índice local de sesiones (gitignored)
+├── opencode.json               # Configuración de modelos y providers para OpenCode
+├── run.py                      # Launcher del backend desde la raíz del proyecto
+├── dev.ps1                     # Script para lanzar backend + frontend + abrir navegador
+├── agent_debugging/            # Directorio de trabajo para agentes de debugging
+├── agent_documentation/        # Directorio de trabajo para agentes de documentación
+└── docs/                       # Documentación adicional
+```
+
+---
+
+## Funcionalidades
+
+- **Sesiones multi-agente** — Ejecutar múltiples agentes en paralelo, cada uno con su modelo, directorio de trabajo y configuración
+- **100+ modelos soportados** — AWS Bedrock (Claude, Llama, Mistral, Qwen, DeepSeek, ...), NagaAI (gratis) y OpenCode Zen (gratis)
+- **16 harnesses de agente** — OpenCode, Claude Code, Codex, Gemini, Cursor, Copilot, Kiro, Qwen, Kimi, Kilocode, iFlow, Droid, OpenClaw, Pi, Qoder, Trae
+- **Interfaz multi-panel** — Abrir múltiples chats lado a lado en el navegador
+- **Broadcast** — Enviar el mismo prompt a todas las sesiones abiertas simultáneamente
+- **Estado en tiempo real** — Indicadores visuales por sesión: idle, thinking, tool_use, responding
+- **Persistencia de mensajes** — Historial de chat guardado en localStorage por sesión
+- **Sidebar colapsable** — Más espacio para los paneles cuando se necesita
+- **Almacenamiento local de sesiones** — Índice propio en `sessions/index.json`, con fallback a `~/.acpx/sessions/`
+
+---
+
+## Prerrequisitos
+
+| Requisito | Versión | Instalación |
+|-----------|---------|-------------|
+| Python | 3.12+ | [python.org](https://python.org/) |
 | Node.js | 18+ | [nodejs.org](https://nodejs.org/) |
 | acpx | latest | `npm install -g acpx@latest` |
 | OpenCode | latest | `npm install -g opencode-ai@latest` |
 
-For AWS Bedrock models, configure your AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`).
+Para modelos de AWS Bedrock, configurar credenciales AWS (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`).
+
+Para modelos NagaAI (gratis), configurar `NAGA_API_KEY`.
 
 ---
 
-## Installation
+## Instalación
 
 ```bash
-git clone https://github.com/your-org/agent-harness-orchestrator.git
+git clone https://github.com/DDC-NEORIS/agent-harness-orchestrator.git
 cd agent-harness-orchestrator
 
-python -m venv .venv
-source .venv/bin/activate
+# Backend
+pip install -r backend/requirements.txt
 
-pip install -r requirements.txt
+# Frontend
+cd frontend && npm install && cd ..
 ```
 
 ---
 
-## Quick Start
+## Inicio Rápido
 
-### Create and prompt a session
+### Opción 1: Script de desarrollo (recomendado)
+
+```powershell
+.\dev.ps1
+```
+
+Lanza backend + frontend en terminales separadas y abre el navegador en `http://localhost:3000`.
+
+### Opción 2: Manual
+
+```bash
+# Terminal 1 — Backend
+python run.py
+
+# Terminal 2 — Frontend
+cd frontend && npm run dev
+```
+
+Abrir `http://localhost:3000` en el navegador.
+
+### Opción 3: Uso programático (sin frontend)
 
 ```python
-from launch_session_opencode import Session
-import os
+from backend.launch_sessions import Session
 
 session = Session(
-    name="my_agent",
-    working_dir=os.path.join(os.path.dirname(__file__), "agent_debugging"),
-    LLM="amazon-bedrock/anthropic.claude-sonnet-4-6"
+    agent_harness="opencode",
+    name="mi_agente",
+    working_dir="./agent_debugging",
+    LLM="opencode/big-pickle",
 )
 
-# Send a prompt and capture the response
-response = session.prompt_session("Fix the failing test in test_auth.py", capture_output=True)
-print(response)
+respuesta = session.prompt_session("Arregla el test que falla", capture_output=True)
+print(respuesta)
 
-# Send a prompt with real-time streaming output
-session.prompt_session("Now add edge case tests for empty credentials")
-
-# Clean up
 session.close_session()
 ```
 
-### Run multiple agents
+---
 
-```python
-debugging = Session(
-    name="agent_debugging",
-    working_dir="./agent_debugging",
-    LLM="amazon-bedrock/anthropic.claude-sonnet-4-6"
-)
+## API del Backend
 
-documentation = Session(
-    name="agent_documentation",
-    working_dir="./agent_documentation",
-    LLM="amazon-bedrock/moonshot.kimi-k2-thinking"
-)
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| `GET` | `/sessions` | Listar sesiones (locales + acpx) |
+| `POST` | `/sessions` | Crear nueva sesión |
+| `DELETE` | `/sessions/{nombre}` | Cerrar y eliminar sesión |
+| `GET` | `/sessions/status` | Estado de actividad de cada sesión |
+| `GET` | `/models/{harness}` | Modelos disponibles para un harness |
+| `POST` | `/agent/{nombre}` | Endpoint AG-UI — streaming SSE de conversación |
 
-deb = debugging.prompt_session("What is your LLM", capture_output=True)
-doc = documentation.prompt_session("What is your LLM", capture_output=True)
+### Crear sesión (POST /sessions)
 
-print(f"Debugging: {deb}")
-print(f"Documentation: {doc}")
-
-debugging.close_session()
-documentation.close_session()
-```
-
-### Clean up sessions
-
-```python
-from remove_session import remove_session, remove_all_sessions
-
-# Remove a specific session
-remove_session("agent_debugging")
-
-# Remove all sessions
-remove_all_sessions()
+```json
+{
+  "name": "mi_sesion",
+  "agent_harness": "opencode",
+  "working_dir": "C:/ruta/al/proyecto",
+  "LLM": "opencode/big-pickle"
+}
 ```
 
 ---
 
-## Project Structure
+## Eventos ACP → AG-UI
 
-```
-agent-harness-orchestrator/
-├── launch_session_opencode.py   # Session class — create, prompt, close agent sessions
-├── remove_session.py            # Session cleanup — remove by name or remove all
-├── requirements.txt             # Python dependencies
-├── agent_debugging/
-│   └── opencode.json            # Model config (written dynamically per session)
-├── agent_documentation/
-│   └── opencode.json            # Model config (written dynamically per session)
-└── docs/
-    ├── concept.md               # Problem statement, vision, key differentiators
-    ├── technology-stack.md      # ACP, acpx, OpenCode, planned tools (githubkit, Textual, FastAPI)
-    └── architecture-overview.md # System architecture, data flow, session lifecycle, roadmap
-```
+El traductor `acp_to_agui.py` mapea notificaciones ACP a eventos AG-UI:
+
+| Evento ACP (`sessionUpdate`) | Evento AG-UI | Descripción |
+|------------------------------|--------------|-------------|
+| `agent_message_chunk` | `TextMessageChunkEvent` | Texto de respuesta del agente |
+| `agent_thought_chunk` | `ReasoningMessageChunkEvent` | Pensamiento/razonamiento del agente |
+| `tool_call` | `ToolCallChunkEvent` | Invocación de herramienta (nombre + args) |
+| `tool_call_update` (completed/failed) | `ToolCallResultEvent` | Resultado de la herramienta |
+| `tool_call_update` (otros) | `CustomEvent` | Estados intermedios |
+| Cualquier otro | `CustomEvent` | Eventos desconocidos preservados |
 
 ---
 
-## API Reference
+## Harnesses Soportados
 
-### `Session(name, working_dir, LLM, capture_output)`
-
-Creates a new agent session.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `name` | `str` | — | Session name (used for `acpx -s <name>`) |
-| `working_dir` | `str` | — | Agent's working directory (contains `opencode.json`) |
-| `LLM` | `str` | `"opencode/nemotron-3-super-free"` | Model identifier (validated against `SUPPORTED_MODELS`) |
-| `capture_output` | `bool` | `True` | Capture or stream stdout during session creation |
-
-### `session.prompt_session(prompt, capture_output)`
-
-Sends a prompt to the session.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `prompt` | `str` | — | The prompt text to send |
-| `capture_output` | `bool` | `False` | `True` = return filtered string, `False` = print in real time |
-
-**Returns**: Filtered agent response (`str`) if `capture_output=True`, else `None`.
-
-### `session.close_session()`
-
-Closes the session via `acpx opencode sessions close`.
-
-### `remove_session(session_name)`
-
-Removes a session by name — deletes `.json` and `.stream.ndjson` files from `~/.acpx/sessions/` and updates the index.
-
-### `remove_all_sessions()`
-
-Removes all sessions from `~/.acpx/sessions/`.
-
----
-
-## Supported Agents
-
-Any agent with an `acpx` adapter works. To switch agents, change the `acpx opencode` commands in `Session._run()` to `acpx <agent>`:
-
-| Agent | Command | Notes |
-|-------|---------|-------|
-| OpenCode | `acpx opencode` | Default — open-source, provider-agnostic |
+| Agente | Comando acpx | Notas |
+|--------|-------------|-------|
+| OpenCode | `acpx opencode` | Por defecto — open-source, multi-provider |
 | Claude Code | `acpx claude` | Anthropic Claude Code |
 | Codex | `acpx codex` | OpenAI Codex CLI |
 | Gemini | `acpx gemini` | Google Gemini CLI |
 | Cursor | `acpx cursor` | Cursor CLI agent |
 | Copilot | `acpx copilot` | GitHub Copilot CLI |
-| Pi | `acpx pi` | Pi Coding Agent |
 | Kiro | `acpx kiro` | Kiro CLI |
-| Kilocode | `acpx kilocode` | Kilocode agent |
 | Qwen | `acpx qwen` | Qwen Code |
-| Custom | `acpx --agent <cmd>` | Any ACP-compatible server |
+| Kimi | `acpx kimi` | Kimi CLI |
+| Kilocode | `acpx kilocode` | Kilocode agent |
+| iFlow | `acpx iflow` | iFlow agent |
+| Droid | `acpx droid` | Droid agent |
+| OpenClaw | `acpx openclaw` | OpenClaw agent |
+| Pi | `acpx pi` | Pi Coding Agent |
+| Qoder | `acpx qoder` | Qoder agent |
+| Trae | `acpx trae` | Trae agent |
 
 ---
 
-## Documentation
+## Tests
 
-Detailed documentation lives in `docs/`:
+```bash
+cd backend
+python -m pytest tests/ -v
+```
 
-- **[Concept](docs/concept.md)** — Problem statement, vision, what patterns we adopt and why
-- **[Technology Stack](docs/technology-stack.md)** — ACP protocol, acpx, OpenCode, opencode-ai SDK, planned integrations (githubkit, Textual, FastAPI)
-- **[Architecture Overview](docs/architecture-overview.md)** — System layers, data flow, session lifecycle, design decisions, future roadmap
+65 tests cubriendo: traducción ACP→AG-UI, endpoints del servidor, validación de modelos, gestión de sesiones y limpieza.
 
 ---
 
 ## Roadmap
 
-| Phase | Focus | Status |
-|-------|-------|--------|
-| **1** | Async + concurrent sessions (`asyncio`, `anyio`) | Planned |
-| **2** | GitHub reaction loop (`githubkit` — PRs, CI webhooks, review routing) | Planned |
-| **3** | Dashboard (Textual TUI → FastAPI + HTMX web UI) | Planned |
-| **4** | Multi-agent coordination (task decomposition, result aggregation) | Planned |
+| Fase | Foco | Estado |
+|------|------|--------|
+| **1** | Sesiones async + concurrentes (`asyncio`) | Completado |
+| **2** | Frontend web con CopilotKit + AG-UI | Completado |
+| **3** | Almacenamiento local de sesiones (pre-DB) | Completado |
+| **4** | Docker Compose (backend + frontend) | Planificado |
+| **5** | Base de datos para sesiones (reemplazar JSON) | Planificado |
+| **6** | Bucle de reacción GitHub (`githubkit`) | Planificado |
+| **7** | Coordinación multi-agente (descomposición de tareas) | Planificado |
 
 ---
 
-## License
+## Licencia
 
 [MIT](LICENSE) — Copyright (c) 2026 NEORIS
