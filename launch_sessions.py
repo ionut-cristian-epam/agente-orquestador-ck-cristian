@@ -5,6 +5,9 @@ import subprocess
 import warnings
 from typing import AsyncIterator
 
+from dotenv import load_dotenv
+load_dotenv()
+
 warnings.filterwarnings("ignore")
 
 from available_models import SUPPORTED_MODELS_OPENCODE, SUPPORTED_MODELS_COPILOT_CLI

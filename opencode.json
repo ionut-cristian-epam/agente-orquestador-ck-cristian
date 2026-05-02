@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/big-pickle",
+  "model": "nagaai/gpt-4.1-mini-2025-04-14:free",
   "provider": {
     "nagaai": {
       "npm": "@ai-sdk/openai-compatible",

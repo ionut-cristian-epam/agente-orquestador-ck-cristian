@@ -9,6 +9,9 @@ Endpoints:
 import json
 import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -35,6 +38,7 @@ from ag_ui.encoder import EventEncoder
 
 from launch_sessions import Session
 from acp_to_agui import map_acp_event
+from available_models import SUPPORTED_MODELS_OPENCODE, SUPPORTED_MODELS_COPILOT_CLI
 
 ACPX_SESSIONS_DIR = Path.home() / ".acpx" / "sessions"
 PROJECT_ROOT = Path(
@@ -185,6 +189,31 @@ def delete_session(name: str):
     except Exception as e:
         return {"status": "closed_with_errors", "error": str(e)}
     return {"status": "closed"}
+
+
+_MODELS_BY_HARNESS: dict[str, dict[str, list[str]]] = {
+    "opencode": {},
+    "copilot": {"Copilot CLI": SUPPORTED_MODELS_COPILOT_CLI},
+}
+
+for _m in SUPPORTED_MODELS_OPENCODE:
+    _provider = _m.split("/")[0]
+    _label = {
+        "nagaai": "NagaAI (Free)",
+        "opencode": "OpenCode Zen (Free)",
+        "amazon-bedrock": "Amazon Bedrock",
+    }.get(_provider, _provider)
+    _MODELS_BY_HARNESS["opencode"].setdefault(_label, []).append(_m)
+
+
+@app.get("/models/{harness}")
+def get_models(harness: str):
+    groups = _MODELS_BY_HARNESS.get(harness)
+    if groups is None:
+        return {"groups": {}, "default": ""}
+    flat = [m for models in groups.values() for m in models]
+    default = flat[0] if flat else ""
+    return {"groups": groups, "default": default}
 
 
 def _last_user_text(input_data: RunAgentInput) -> Optional[str]:

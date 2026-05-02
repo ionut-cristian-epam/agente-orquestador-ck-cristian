@@ -329,3 +329,35 @@ class TestSessionStatus:
         with TestClient(app) as client:
             client.delete("/sessions/s1")
         assert "s1" not in _session_status
+
+
+# ---------------------------------------------------------------------------
+# GET /models/{harness}
+# ---------------------------------------------------------------------------
+
+class TestGetModels:
+    def test_opencode_returns_grouped_models(self):
+        with TestClient(app) as client:
+            res = client.get("/models/opencode")
+        assert res.status_code == 200
+        data = res.json()
+        assert "groups" in data
+        assert "default" in data
+        assert len(data["groups"]) > 0
+        assert data["default"] != ""
+
+    def test_copilot_returns_models(self):
+        with TestClient(app) as client:
+            res = client.get("/models/copilot")
+        assert res.status_code == 200
+        data = res.json()
+        assert "Copilot CLI" in data["groups"]
+        assert len(data["groups"]["Copilot CLI"]) > 0
+
+    def test_unknown_harness_returns_empty(self):
+        with TestClient(app) as client:
+            res = client.get("/models/claude")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["groups"] == {}
+        assert data["default"] == ""

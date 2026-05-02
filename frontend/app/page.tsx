@@ -5,6 +5,7 @@ import {
   CopilotKitProvider,
   CopilotChat,
   CopilotChatConfigurationProvider,
+  useCopilotChatConfiguration,
   useAgent,
   useCopilotKit,
 } from "@copilotkit/react-core/v2";
@@ -43,132 +44,7 @@ const DEFAULT_HARNESSES = [
   "copilot",
 ];
 
-const MODELS_OPENCODE: Record<string, string[]> = {
-  "NagaAI (Free)": [
-    "nagaai/gemini-2.5-flash:free",
-    "nagaai/llama-3.3-70b-instruct:free",
-    "nagaai/gpt-4.1-mini-2025-04-14:free",
-    "nagaai/llama-4-scout-17b-16e-instruct:free",
-    "nagaai/nemotron-3-super-120b-a12b:free",
-    "nagaai/glm-4.5-air:free",
-    "nagaai/sonar:free",
-  ],
-  "OpenCode Zen (Free)": [
-    "opencode/big-pickle",
-    "opencode/gpt-5-nano",
-    "opencode/mimo-v2-omni-free",
-    "opencode/mimo-v2-pro-free",
-    "opencode/minimax-m2.5-free",
-    "opencode/nemotron-3-super-free",
-  ],
-  "Amazon Bedrock": [
-    "amazon-bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
-    "amazon-bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "amazon-bedrock/anthropic.claude-sonnet-4-20250514-v1:0",
-    "amazon-bedrock/amazon.nova-pro-v1:0",
-    "amazon-bedrock/amazon.nova-lite-v1:0",
-    "amazon-bedrock/amazon.nova-micro-v1:0",
-    "amazon-bedrock/amazon.nova-2-lite-v1:0",
-    "amazon-bedrock/amazon.nova-premier-v1:0",
-    "amazon-bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-    "amazon-bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0",
-    "amazon-bedrock/anthropic.claude-3-haiku-20240307-v1:0",
-    "amazon-bedrock/anthropic.claude-haiku-4-5-20251001-v1:0",
-    "amazon-bedrock/anthropic.claude-opus-4-1-20250805-v1:0",
-    "amazon-bedrock/anthropic.claude-opus-4-20250514-v1:0",
-    "amazon-bedrock/anthropic.claude-opus-4-5-20251101-v1:0",
-    "amazon-bedrock/anthropic.claude-opus-4-6-v1",
-    "amazon-bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "amazon-bedrock/anthropic.claude-sonnet-4-6",
-    "amazon-bedrock/deepseek.r1-v1:0",
-    "amazon-bedrock/deepseek.v3-v1:0",
-    "amazon-bedrock/deepseek.v3.2",
-    "amazon-bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "amazon-bedrock/eu.anthropic.claude-opus-4-5-20251101-v1:0",
-    "amazon-bedrock/eu.anthropic.claude-opus-4-6-v1",
-    "amazon-bedrock/eu.anthropic.claude-sonnet-4-20250514-v1:0",
-    "amazon-bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "amazon-bedrock/eu.anthropic.claude-sonnet-4-6",
-    "amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "amazon-bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0",
-    "amazon-bedrock/global.anthropic.claude-opus-4-6-v1",
-    "amazon-bedrock/global.anthropic.claude-sonnet-4-20250514-v1:0",
-    "amazon-bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "amazon-bedrock/global.anthropic.claude-sonnet-4-6",
-    "amazon-bedrock/google.gemma-3-12b-it",
-    "amazon-bedrock/google.gemma-3-27b-it",
-    "amazon-bedrock/google.gemma-3-4b-it",
-    "amazon-bedrock/meta.llama3-1-405b-instruct-v1:0",
-    "amazon-bedrock/meta.llama3-1-70b-instruct-v1:0",
-    "amazon-bedrock/meta.llama3-1-8b-instruct-v1:0",
-    "amazon-bedrock/meta.llama3-2-11b-instruct-v1:0",
-    "amazon-bedrock/meta.llama3-2-1b-instruct-v1:0",
-    "amazon-bedrock/meta.llama3-2-3b-instruct-v1:0",
-    "amazon-bedrock/meta.llama3-2-90b-instruct-v1:0",
-    "amazon-bedrock/meta.llama3-3-70b-instruct-v1:0",
-    "amazon-bedrock/meta.llama4-maverick-17b-instruct-v1:0",
-    "amazon-bedrock/meta.llama4-scout-17b-instruct-v1:0",
-    "amazon-bedrock/minimax.minimax-m2",
-    "amazon-bedrock/minimax.minimax-m2.1",
-    "amazon-bedrock/minimax.minimax-m2.5",
-    "amazon-bedrock/mistral.devstral-2-123b",
-    "amazon-bedrock/mistral.magistral-small-2509",
-    "amazon-bedrock/mistral.ministral-3-14b-instruct",
-    "amazon-bedrock/mistral.ministral-3-3b-instruct",
-    "amazon-bedrock/mistral.ministral-3-8b-instruct",
-    "amazon-bedrock/mistral.mistral-large-3-675b-instruct",
-    "amazon-bedrock/mistral.pixtral-large-2502-v1:0",
-    "amazon-bedrock/mistral.voxtral-mini-3b-2507",
-    "amazon-bedrock/mistral.voxtral-small-24b-2507",
-    "amazon-bedrock/moonshot.kimi-k2-thinking",
-    "amazon-bedrock/moonshotai.kimi-k2.5",
-    "amazon-bedrock/nvidia.nemotron-nano-12b-v2",
-    "amazon-bedrock/nvidia.nemotron-nano-3-30b",
-    "amazon-bedrock/nvidia.nemotron-nano-9b-v2",
-    "amazon-bedrock/nvidia.nemotron-super-3-120b",
-    "amazon-bedrock/openai.gpt-oss-120b-1:0",
-    "amazon-bedrock/openai.gpt-oss-20b-1:0",
-    "amazon-bedrock/openai.gpt-oss-safeguard-120b",
-    "amazon-bedrock/openai.gpt-oss-safeguard-20b",
-    "amazon-bedrock/qwen.qwen3-235b-a22b-2507-v1:0",
-    "amazon-bedrock/qwen.qwen3-32b-v1:0",
-    "amazon-bedrock/qwen.qwen3-coder-30b-a3b-v1:0",
-    "amazon-bedrock/qwen.qwen3-coder-480b-a35b-v1:0",
-    "amazon-bedrock/qwen.qwen3-next-80b-a3b",
-    "amazon-bedrock/qwen.qwen3-vl-235b-a22b",
-    "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "amazon-bedrock/us.anthropic.claude-opus-4-1-20250805-v1:0",
-    "amazon-bedrock/us.anthropic.claude-opus-4-20250514-v1:0",
-    "amazon-bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0",
-    "amazon-bedrock/us.anthropic.claude-opus-4-6-v1",
-    "amazon-bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
-    "amazon-bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "amazon-bedrock/us.anthropic.claude-sonnet-4-6",
-    "amazon-bedrock/writer.palmyra-x4-v1:0",
-    "amazon-bedrock/writer.palmyra-x5-v1:0",
-    "amazon-bedrock/zai.glm-4.7",
-    "amazon-bedrock/zai.glm-4.7-flash",
-    "amazon-bedrock/zai.glm-5",
-  ],
-};
-
-const MODELS_COPILOT = [
-  "claude-sonnet-4.6",
-  "claude-sonnet-4.5",
-  "claude-haiku-4.5",
-  "claude-opus-4.6",
-  "claude-opus-4.5",
-  "gpt-5.4",
-  "gpt-5.3-codex",
-  "gpt-5.4-mini",
-  "gpt-5-mini",
-  "gpt-4.1",
-];
-
-const DEFAULT_LLM: Record<string, string> = {
-  opencode: "opencode/big-pickle",
-  copilot: "claude-sonnet-4.6",
-};
+type ModelData = { groups: Record<string, string[]>; default: string };
 
 /* ------------------------------------------------------------------ */
 /*  Message persistence — saves/restores chat history per session      */
@@ -253,27 +129,33 @@ function getOrCreateThreadId(sessionName: string): string {
 }
 
 function BroadcastReceiver({
-  agentId,
-  threadId,
   onRegister,
 }: {
-  agentId: string;
-  threadId: string;
   onRegister: (send: BroadcastSendFn) => void;
 }) {
-  const { agent } = useAgent({ agentId, threadId });
+  const chatCfg = useCopilotChatConfiguration();
+  const { agent } = useAgent({
+    agentId: chatCfg?.agentId,
+    threadId: chatCfg?.threadId,
+  });
   const { copilotkit } = useCopilotKit();
+  const agentRef = useRef(agent);
+  const ckRef = useRef(copilotkit);
+
+  useEffect(() => { agentRef.current = agent; }, [agent]);
+  useEffect(() => { ckRef.current = copilotkit; }, [copilotkit]);
 
   useEffect(() => {
     onRegister(async (text: string) => {
-      agent.addMessage({
+      const a = agentRef.current;
+      a.addMessage({
         id: crypto.randomUUID(),
         role: "user" as const,
         content: text,
       });
-      await copilotkit.runAgent({ agent });
+      await ckRef.current.runAgent({ agent: a });
     });
-  }, [agent, copilotkit, onRegister]);
+  }, [onRegister]);
 
   return null;
 }
@@ -282,12 +164,16 @@ function BroadcastReceiver({
 /*  Clear chat — wipe agent messages + localStorage                    */
 /* ------------------------------------------------------------------ */
 
-function ClearChatButton({ agentId, threadId }: { agentId: string; threadId: string }) {
-  const { agent } = useAgent({ agentId, threadId });
+function ClearChatButton({ sessionName }: { sessionName: string }) {
+  const chatCfg = useCopilotChatConfiguration();
+  const { agent } = useAgent({
+    agentId: chatCfg?.agentId,
+    threadId: chatCfg?.threadId,
+  });
 
   const handleClear = () => {
     agent.setMessages([]);
-    localStorage.removeItem(STORAGE_KEY_PREFIX + agentId);
+    localStorage.removeItem(STORAGE_KEY_PREFIX + sessionName);
   };
 
   return (
@@ -328,7 +214,7 @@ function ChatPanel({
     <CopilotKitProvider key={name} agents__unsafe_dev_only={agents}>
       <CopilotChatConfigurationProvider agentId={name} threadId={threadId}>
         {onBroadcastReady && (
-          <BroadcastReceiver agentId={name} threadId={threadId} onRegister={onBroadcastReady} />
+          <BroadcastReceiver onRegister={onBroadcastReady} />
         )}
         <div className="flex flex-col h-full min-w-0 overflow-hidden border-r last:border-r-0 border-zinc-200 dark:border-zinc-800">
           <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 shrink-0">
@@ -343,7 +229,7 @@ function ChatPanel({
               )}
             </span>
             <span className="flex items-center gap-1">
-              <ClearChatButton agentId={name} threadId={threadId} />
+              <ClearChatButton sessionName={name} />
               <button
                 onClick={onClose}
                 className="text-xs opacity-50 hover:opacity-100 px-1.5 py-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800"
@@ -393,8 +279,29 @@ export default function Home() {
   const [formName, setFormName] = useState("");
   const [formHarness, setFormHarness] = useState("opencode");
   const [formCwd, setFormCwd] = useState("");
-  const [formLLM, setFormLLM] = useState("opencode/big-pickle");
+  const [formLLM, setFormLLM] = useState("");
   const [creating, setCreating] = useState(false);
+  const [modelData, setModelData] = useState<ModelData | null>(null);
+  const [loadingModels, setLoadingModels] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingModels(true);
+    fetch(`${BACKEND}/models/${encodeURIComponent(formHarness)}`)
+      .then((r) => r.json())
+      .then((data: ModelData) => {
+        if (cancelled) return;
+        setModelData(data);
+        setFormLLM((cur) => {
+          const allModels = Object.values(data.groups).flat();
+          if (cur && allModels.includes(cur)) return cur;
+          return data.default || "";
+        });
+      })
+      .catch(() => { if (!cancelled) setModelData(null); })
+      .finally(() => { if (!cancelled) setLoadingModels(false); });
+    return () => { cancelled = true; };
+  }, [formHarness]);
 
   // Broadcast prompt
   const [broadcastText, setBroadcastText] = useState("");
@@ -518,17 +425,38 @@ export default function Home() {
   // Filter panels to only those that still exist
   const activePanels = openPanels.filter((n) => n in agentMap);
 
+  const [broadcastError, setBroadcastError] = useState<string | null>(null);
+
   const handleBroadcast = async () => {
     const text = broadcastText.trim();
     if (!text || activePanels.length === 0) return;
     setBroadcasting(true);
     setBroadcastText("");
+    setBroadcastError(null);
     try {
-      const promises = activePanels
-        .map((name) => broadcastFnsRef.current.get(name))
-        .filter(Boolean)
-        .map((fn) => fn!(text).catch(console.error));
-      await Promise.allSettled(promises);
+      const fns = activePanels.map((name) => ({
+        name,
+        fn: broadcastFnsRef.current.get(name),
+      }));
+      const missing = fns.filter((f) => !f.fn).map((f) => f.name);
+      if (missing.length > 0) {
+        setBroadcastError(`No broadcast handler for: ${missing.join(", ")}`);
+        setBroadcasting(false);
+        return;
+      }
+      const results = await Promise.allSettled(
+        fns.map(({ name, fn }) =>
+          fn!(text).catch((e: unknown) => {
+            throw new Error(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+          })
+        )
+      );
+      const errors = results
+        .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+        .map((r) => r.reason?.message || String(r.reason));
+      if (errors.length > 0) setBroadcastError(errors.join("; "));
+    } catch (e) {
+      setBroadcastError(e instanceof Error ? e.message : String(e));
     } finally {
       setBroadcasting(false);
     }
@@ -572,11 +500,7 @@ export default function Home() {
             />
             <select
               value={formHarness}
-              onChange={(e) => {
-                const h = e.target.value;
-                setFormHarness(h);
-                setFormLLM(DEFAULT_LLM[h] || "");
-              }}
+              onChange={(e) => setFormHarness(e.target.value)}
               className="w-full px-2 py-1 text-sm border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100"
             >
               {DEFAULT_HARNESSES.map((h) => (
@@ -590,24 +514,27 @@ export default function Home() {
               onChange={(e) => setFormCwd(e.target.value)}
               className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-transparent"
             />
-            {(formHarness === "opencode" || formHarness === "copilot") ? (
+            {modelData && Object.keys(modelData.groups).length > 0 ? (
               <select
                 value={formLLM}
                 onChange={(e) => setFormLLM(e.target.value)}
-                className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100"
+                disabled={loadingModels}
+                className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 disabled:opacity-50"
               >
-                <option value="">— Select model —</option>
-                {formHarness === "opencode"
-                  ? Object.entries(MODELS_OPENCODE).map(([group, models]) => (
-                      <optgroup key={group} label={group}>
-                        {models.map((m) => (
-                          <option key={m} value={m}>{m}</option>
-                        ))}
-                      </optgroup>
-                    ))
-                  : MODELS_COPILOT.map((m) => (
+                <option value="">{loadingModels ? "Loading..." : "— Select model —"}</option>
+                {Object.entries(modelData.groups).map(([group, models]) =>
+                  Object.keys(modelData.groups).length > 1 ? (
+                    <optgroup key={group} label={group}>
+                      {models.map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </optgroup>
+                  ) : (
+                    models.map((m) => (
                       <option key={m} value={m}>{m}</option>
-                    ))}
+                    ))
+                  )
+                )}
               </select>
             ) : (
               <input
@@ -726,6 +653,11 @@ export default function Home() {
             >
               {broadcasting ? "Sending..." : "Broadcast (Ctrl+Enter)"}
             </button>
+            {broadcastError && (
+              <div className="p-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950 rounded">
+                {broadcastError}
+              </div>
+            )}
           </form>
         )}
       </aside>
