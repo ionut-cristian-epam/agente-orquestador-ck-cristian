@@ -43,6 +43,133 @@ const DEFAULT_HARNESSES = [
   "copilot",
 ];
 
+const MODELS_OPENCODE: Record<string, string[]> = {
+  "NagaAI (Free)": [
+    "nagaai/gemini-2.5-flash:free",
+    "nagaai/llama-3.3-70b-instruct:free",
+    "nagaai/gpt-4.1-mini-2025-04-14:free",
+    "nagaai/llama-4-scout-17b-16e-instruct:free",
+    "nagaai/nemotron-3-super-120b-a12b:free",
+    "nagaai/glm-4.5-air:free",
+    "nagaai/sonar:free",
+  ],
+  "OpenCode Zen (Free)": [
+    "opencode/big-pickle",
+    "opencode/gpt-5-nano",
+    "opencode/mimo-v2-omni-free",
+    "opencode/mimo-v2-pro-free",
+    "opencode/minimax-m2.5-free",
+    "opencode/nemotron-3-super-free",
+  ],
+  "Amazon Bedrock": [
+    "amazon-bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+    "amazon-bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "amazon-bedrock/anthropic.claude-sonnet-4-20250514-v1:0",
+    "amazon-bedrock/amazon.nova-pro-v1:0",
+    "amazon-bedrock/amazon.nova-lite-v1:0",
+    "amazon-bedrock/amazon.nova-micro-v1:0",
+    "amazon-bedrock/amazon.nova-2-lite-v1:0",
+    "amazon-bedrock/amazon.nova-premier-v1:0",
+    "amazon-bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "amazon-bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "amazon-bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+    "amazon-bedrock/anthropic.claude-haiku-4-5-20251001-v1:0",
+    "amazon-bedrock/anthropic.claude-opus-4-1-20250805-v1:0",
+    "amazon-bedrock/anthropic.claude-opus-4-20250514-v1:0",
+    "amazon-bedrock/anthropic.claude-opus-4-5-20251101-v1:0",
+    "amazon-bedrock/anthropic.claude-opus-4-6-v1",
+    "amazon-bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "amazon-bedrock/anthropic.claude-sonnet-4-6",
+    "amazon-bedrock/deepseek.r1-v1:0",
+    "amazon-bedrock/deepseek.v3-v1:0",
+    "amazon-bedrock/deepseek.v3.2",
+    "amazon-bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "amazon-bedrock/eu.anthropic.claude-opus-4-5-20251101-v1:0",
+    "amazon-bedrock/eu.anthropic.claude-opus-4-6-v1",
+    "amazon-bedrock/eu.anthropic.claude-sonnet-4-20250514-v1:0",
+    "amazon-bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "amazon-bedrock/eu.anthropic.claude-sonnet-4-6",
+    "amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "amazon-bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0",
+    "amazon-bedrock/global.anthropic.claude-opus-4-6-v1",
+    "amazon-bedrock/global.anthropic.claude-sonnet-4-20250514-v1:0",
+    "amazon-bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "amazon-bedrock/global.anthropic.claude-sonnet-4-6",
+    "amazon-bedrock/google.gemma-3-12b-it",
+    "amazon-bedrock/google.gemma-3-27b-it",
+    "amazon-bedrock/google.gemma-3-4b-it",
+    "amazon-bedrock/meta.llama3-1-405b-instruct-v1:0",
+    "amazon-bedrock/meta.llama3-1-70b-instruct-v1:0",
+    "amazon-bedrock/meta.llama3-1-8b-instruct-v1:0",
+    "amazon-bedrock/meta.llama3-2-11b-instruct-v1:0",
+    "amazon-bedrock/meta.llama3-2-1b-instruct-v1:0",
+    "amazon-bedrock/meta.llama3-2-3b-instruct-v1:0",
+    "amazon-bedrock/meta.llama3-2-90b-instruct-v1:0",
+    "amazon-bedrock/meta.llama3-3-70b-instruct-v1:0",
+    "amazon-bedrock/meta.llama4-maverick-17b-instruct-v1:0",
+    "amazon-bedrock/meta.llama4-scout-17b-instruct-v1:0",
+    "amazon-bedrock/minimax.minimax-m2",
+    "amazon-bedrock/minimax.minimax-m2.1",
+    "amazon-bedrock/minimax.minimax-m2.5",
+    "amazon-bedrock/mistral.devstral-2-123b",
+    "amazon-bedrock/mistral.magistral-small-2509",
+    "amazon-bedrock/mistral.ministral-3-14b-instruct",
+    "amazon-bedrock/mistral.ministral-3-3b-instruct",
+    "amazon-bedrock/mistral.ministral-3-8b-instruct",
+    "amazon-bedrock/mistral.mistral-large-3-675b-instruct",
+    "amazon-bedrock/mistral.pixtral-large-2502-v1:0",
+    "amazon-bedrock/mistral.voxtral-mini-3b-2507",
+    "amazon-bedrock/mistral.voxtral-small-24b-2507",
+    "amazon-bedrock/moonshot.kimi-k2-thinking",
+    "amazon-bedrock/moonshotai.kimi-k2.5",
+    "amazon-bedrock/nvidia.nemotron-nano-12b-v2",
+    "amazon-bedrock/nvidia.nemotron-nano-3-30b",
+    "amazon-bedrock/nvidia.nemotron-nano-9b-v2",
+    "amazon-bedrock/nvidia.nemotron-super-3-120b",
+    "amazon-bedrock/openai.gpt-oss-120b-1:0",
+    "amazon-bedrock/openai.gpt-oss-20b-1:0",
+    "amazon-bedrock/openai.gpt-oss-safeguard-120b",
+    "amazon-bedrock/openai.gpt-oss-safeguard-20b",
+    "amazon-bedrock/qwen.qwen3-235b-a22b-2507-v1:0",
+    "amazon-bedrock/qwen.qwen3-32b-v1:0",
+    "amazon-bedrock/qwen.qwen3-coder-30b-a3b-v1:0",
+    "amazon-bedrock/qwen.qwen3-coder-480b-a35b-v1:0",
+    "amazon-bedrock/qwen.qwen3-next-80b-a3b",
+    "amazon-bedrock/qwen.qwen3-vl-235b-a22b",
+    "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "amazon-bedrock/us.anthropic.claude-opus-4-1-20250805-v1:0",
+    "amazon-bedrock/us.anthropic.claude-opus-4-20250514-v1:0",
+    "amazon-bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0",
+    "amazon-bedrock/us.anthropic.claude-opus-4-6-v1",
+    "amazon-bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "amazon-bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "amazon-bedrock/us.anthropic.claude-sonnet-4-6",
+    "amazon-bedrock/writer.palmyra-x4-v1:0",
+    "amazon-bedrock/writer.palmyra-x5-v1:0",
+    "amazon-bedrock/zai.glm-4.7",
+    "amazon-bedrock/zai.glm-4.7-flash",
+    "amazon-bedrock/zai.glm-5",
+  ],
+};
+
+const MODELS_COPILOT = [
+  "claude-sonnet-4.6",
+  "claude-sonnet-4.5",
+  "claude-haiku-4.5",
+  "claude-opus-4.6",
+  "claude-opus-4.5",
+  "gpt-5.4",
+  "gpt-5.3-codex",
+  "gpt-5.4-mini",
+  "gpt-5-mini",
+  "gpt-4.1",
+];
+
+const DEFAULT_LLM: Record<string, string> = {
+  opencode: "opencode/big-pickle",
+  copilot: "claude-sonnet-4.6",
+};
+
 /* ------------------------------------------------------------------ */
 /*  Message persistence — saves/restores chat history per session      */
 /* ------------------------------------------------------------------ */
@@ -445,8 +572,12 @@ export default function Home() {
             />
             <select
               value={formHarness}
-              onChange={(e) => setFormHarness(e.target.value)}
-              className="w-full px-2 py-1 text-sm border border-zinc-300 dark:border-zinc-700 rounded bg-transparent"
+              onChange={(e) => {
+                const h = e.target.value;
+                setFormHarness(h);
+                setFormLLM(DEFAULT_LLM[h] || "");
+              }}
+              className="w-full px-2 py-1 text-sm border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100"
             >
               {DEFAULT_HARNESSES.map((h) => (
                 <option key={h} value={h}>{h}</option>
@@ -459,12 +590,33 @@ export default function Home() {
               onChange={(e) => setFormCwd(e.target.value)}
               className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-transparent"
             />
-            <input
-              placeholder="LLM (optional)"
-              value={formLLM}
-              onChange={(e) => setFormLLM(e.target.value)}
-              className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-transparent"
-            />
+            {(formHarness === "opencode" || formHarness === "copilot") ? (
+              <select
+                value={formLLM}
+                onChange={(e) => setFormLLM(e.target.value)}
+                className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100"
+              >
+                <option value="">— Select model —</option>
+                {formHarness === "opencode"
+                  ? Object.entries(MODELS_OPENCODE).map(([group, models]) => (
+                      <optgroup key={group} label={group}>
+                        {models.map((m) => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </optgroup>
+                    ))
+                  : MODELS_COPILOT.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+              </select>
+            ) : (
+              <input
+                placeholder="LLM (optional)"
+                value={formLLM}
+                onChange={(e) => setFormLLM(e.target.value)}
+                className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100"
+              />
+            )}
             <button
               type="submit"
               disabled={creating}
