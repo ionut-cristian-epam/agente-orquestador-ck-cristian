@@ -1,0 +1,31 @@
+# Dependencies
+frontend/node_modules
+backend/__pycache__
+**/__pycache__
+*.pyc
+
+# Version control
+.git
+.gitignore
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment
+.env
+
+# Sessions data (mounted as volume)
+sessions/*
+!sessions/.gitkeep
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Docker
+docker-compose.yml
+Dockerfile
