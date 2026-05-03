@@ -411,10 +411,12 @@ export default function Home() {
   };
 
   const handleDelete = async (name: string) => {
-    if (!confirm(`Close session '${name}'?`)) return;
+    if (!confirm(`Delete session '${name}'? This will remove all message history.`)) return;
     try {
       const res = await fetch(`${BACKEND}/sessions/${encodeURIComponent(name)}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      localStorage.removeItem(STORAGE_KEY_PREFIX + name);
+      localStorage.removeItem(THREAD_KEY_PREFIX + name);
       closePanel(name);
       await refresh();
     } catch (e) {

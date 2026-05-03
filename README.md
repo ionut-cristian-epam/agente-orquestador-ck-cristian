@@ -86,6 +86,73 @@ Framework React para aplicaciones web. Usado aquí como base del frontend (v16).
 
 ---
 
+## Flujo de Mensajes y Persistencia
+
+### Diagrama de flujo
+
+```
+ NAVEGADOR                          BACKEND (FastAPI)                    DISCO
+ ─────────                          ─────────────────                    ─────
+
+ ┌─────────────┐    POST /agent/{n}    ┌──────────────┐    stdin        ┌───────────┐
+ │  CopilotChat │ ──────────────────▶  │ agui_server  │ ────────────▶  │   acpx    │
+ │  (panel)     │    (AG-UI request)   │              │   prompt        │   CLI     │
+ └──────┬───────┘                      └──────┬───────┘                 └─────┬─────┘
+        │                                     │                               │
+        │                                     │    stdout (NDJSON)            │
+        │                                     │ ◀──────────────────────────── │
+        │                                     │    eventos ACP JSON-RPC       │
+        │                                     │                               │
+        │                              ┌──────┴───────┐                       │
+        │                              │ acp_to_agui  │                       │
+        │                              │ (traductor)  │                ┌──────┴──────┐
+        │                              └──────┬───────┘                │  ~/.acpx/   │
+        │                                     │                        │  sessions/  │
+        │         SSE stream (AG-UI)          │                        │  {id}.stream│
+        │ ◀─────────────────────────────────  │                        │  .ndjson    │
+        │   TextMessageChunkEvent             │                        │  (auto)     │
+        │   ReasoningMessageChunkEvent        │                        └─────────────┘
+        │   ToolCallChunkEvent                │
+        │   ToolCallResultEvent               │
+        │                                     │
+ ┌──────┴───────┐                             │
+ │  agent       │                             │
+ │  .messages[] │                             │
+ │  (JS memory) │                             │
+ └──────┬───────┘                             │
+        │                                     │
+ ┌──────┴───────┐                      ┌──────┴───────┐
+ │ localStorage │                      │  sessions/   │
+ │ chat_messages│                      │  index.json  │
+ │ :{nombre}    │                      │  (metadata)  │
+ └──────────────┘                      └──────────────┘
+```
+
+### Paso a paso
+
+1. **Usuario escribe mensaje** — CopilotChat llama `agent.addMessage({ role: "user", content: texto })`, guarda en `agent.messages[]` (memoria JS) y en `localStorage`, luego ejecuta `POST /agent/{nombre}` al backend
+2. **Backend recibe prompt** — `agui_server.py` extrae el último texto del usuario y llama `session.stream_prompt(prompt)`
+3. **Backend envía a acpx** — `launch_sessions.py` ejecuta `acpx --format json {harness} -s {nombre} -f -` y envía el prompt por stdin
+4. **acpx comunica con el agente** — Reenvía el prompt al agente de codificación (OpenCode, Claude, etc.) via protocolo ACP. **acpx automáticamente escribe cada evento en `~/.acpx/sessions/{id}.stream.ndjson`**
+5. **Backend traduce ACP → AG-UI** — `acp_to_agui.py` convierte cada evento: `agent_message_chunk` → `TextMessageChunkEvent`, `agent_thought_chunk` → `ReasoningMessageChunkEvent`, `tool_call` → `ToolCallChunkEvent`, `tool_call_update` → `ToolCallResultEvent`
+6. **Backend envía SSE** — `agui_server.py` gestiona ciclo de vida de eventos (start/content/end) y envía como `StreamingResponse` SSE
+7. **CopilotKit renderiza** — Recibe eventos SSE, actualiza `agent.messages[]` y renderiza texto, pensamiento y tool calls en el panel de chat
+
+### Dónde se almacena cada dato
+
+| Dato | Ubicación | Tipo | Persiste tras cerrar navegador | Persiste tras reiniciar backend |
+|------|-----------|------|-------------------------------|--------------------------------|
+| Mensajes del chat (visual) | `agent.messages[]` | Memoria JS | No | No |
+| Cache de mensajes | `localStorage` clave `chat_messages:{nombre}` | Navegador | Sí | Sí |
+| Stream ACP completo | `~/.acpx/sessions/{id}.stream.ndjson` | Archivo | Sí | Sí |
+| Metadata de sesión (acpx) | `~/.acpx/sessions/{id}.json` | Archivo | Sí | Sí |
+| Índice de sesiones (local) | `sessions/index.json` | Archivo | Sí | Sí |
+| Índice de sesiones (acpx) | `~/.acpx/sessions/index.json` | Archivo | Sí | Sí |
+
+> **Nota:** El historial completo de conversación siempre queda registrado en `~/.acpx/sessions/{id}.stream.ndjson` (gestionado por acpx automáticamente). Sin embargo, la restauración visual de mensajes al recargar el navegador no está disponible actualmente por limitaciones internas de CopilotKit v2. El agente sí mantiene el contexto completo de la conversación aunque no se muestre en pantalla.
+
+---
+
 ## Integración CopilotKit + AG-UI
 
 Este proyecto usa [CopilotKit](https://copilotkit.ai) v2 con el protocolo [AG-UI](https://docs.ag-ui.com) para conectar el frontend con agentes backend personalizados.
@@ -336,7 +403,7 @@ python -m pytest tests/ -v
 | **1** | Sesiones async + concurrentes (`asyncio`) | Completado |
 | **2** | Frontend web con CopilotKit + AG-UI | Completado |
 | **3** | Almacenamiento local de sesiones (pre-DB) | Completado |
-| **4** | Docker Compose (backend + frontend) | Planificado |
+| **4** | Docker Compose (backend + frontend) | Completado |
 | **5** | Base de datos para sesiones (reemplazar JSON) | Planificado |
 | **6** | Bucle de reacción GitHub (`githubkit`) | Planificado |
 | **7** | Coordinación multi-agente (descomposición de tareas) | Planificado |

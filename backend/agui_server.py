@@ -40,6 +40,7 @@ from ag_ui.encoder import EventEncoder
 from launch_sessions import Session
 from acp_to_agui import map_acp_event
 from available_models import SUPPORTED_MODELS_OPENCODE, SUPPORTED_MODELS_COPILOT_CLI
+from remove_session import remove_session
 
 PROJECT_ROOT = Path(
     os.environ.get("AGENT_ORCH_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
@@ -245,13 +246,13 @@ def delete_session(name: str):
         sess = _attach_existing(name)
     if sess is None:
         raise HTTPException(404, f"Session '{name}' not found")
+    remove_session(name)
     try:
         sess.close_session()
-    except Exception as e:
-        _remove_from_local_index(name)
-        return {"status": "closed_with_errors", "error": str(e)}
+    except Exception:
+        pass
     _remove_from_local_index(name)
-    return {"status": "closed"}
+    return {"status": "deleted"}
 
 
 _MODELS_BY_HARNESS: dict[str, dict[str, list[str]]] = {
