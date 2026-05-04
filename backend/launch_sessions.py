@@ -94,8 +94,17 @@ class Session:
         return raw
 
     STREAM_IDLE_TIMEOUT = 60  # seconds with no output before killing subprocess
+    MAX_RECONNECT_ATTEMPTS = 1
 
-    async def stream_prompt(self, prompt: str) -> AsyncIterator[dict]:
+    def _ensure_connected(self) -> None:
+        """Re-run 'sessions ensure' to reconnect a stale agent."""
+        print(f"[reconnect][{self.name}] Running sessions ensure to reconnect agent", flush=True)
+        self._run(
+            ["acpx", self.agent_harness, "sessions", "ensure", "--name", self.name],
+            capture_output=True,
+        )
+
+    async def stream_prompt(self, prompt: str, _reconnect_attempt: int = 0) -> AsyncIterator[dict]:
         """Stream ACP JSON-RPC events from acpx as parsed dicts.
 
         Uses --format json (NDJSON over stdout). Prompt sent via stdin (-f -)
@@ -117,6 +126,7 @@ class Session:
         q: _queue.Queue[dict | None] = _queue.Queue()
         last_output_time = time.monotonic()
         last_output_lock = threading.Lock()
+        needs_reconnect = threading.Event()
 
         def _update_last_output():
             nonlocal last_output_time
@@ -147,6 +157,8 @@ class Session:
                     decoded = err_line.decode("utf-8", errors="replace").rstrip()
                     if decoded:
                         print(f"[acpx stderr][{self.name}] {decoded}", flush=True)
+                        if "needs reconnect" in decoded:
+                            needs_reconnect.set()
 
             stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
             stderr_thread.start()
@@ -171,7 +183,11 @@ class Session:
             except Exception:
                 pass
             if stderr_output:
-                print(f"[acpx stderr][{self.name}] {stderr_output.decode('utf-8', errors='replace').rstrip()}", flush=True)
+                decoded = stderr_output.decode('utf-8', errors='replace').rstrip()
+                if decoded:
+                    print(f"[acpx stderr][{self.name}] {decoded}", flush=True)
+                    if "needs reconnect" in decoded:
+                        needs_reconnect.set()
 
             proc.wait()
             q.put(None)  # sentinel
@@ -180,6 +196,7 @@ class Session:
         fut = loop.run_in_executor(None, _run_in_thread)
 
         _sentinel = object()
+        got_events = False
 
         def _poll_queue():
             try:
@@ -203,9 +220,16 @@ class Session:
                 continue
             if item is None:
                 break
+            got_events = True
             yield item
 
         await fut  # propagate any thread exception
+
+        if needs_reconnect.is_set() and not got_events and _reconnect_attempt < self.MAX_RECONNECT_ATTEMPTS:
+            print(f"[stream_prompt][{self.name}] Reconnecting and retrying prompt (attempt {_reconnect_attempt + 1})", flush=True)
+            self._ensure_connected()
+            async for item in self.stream_prompt(prompt, _reconnect_attempt=_reconnect_attempt + 1):
+                yield item
 
     def close_session(self):
         print(f"\n--- Closing session: {self.name} ---")
