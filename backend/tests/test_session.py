@@ -65,22 +65,22 @@ class TestConfigInjection:
         _make_session(str(tmp_path), harness="opencode", LLM="opencode/big-pickle")
         config_path = tmp_path / "opencode.json"
         assert config_path.exists()
-        config = json.loads(config_path.read_text())
+        config = json.loads(config_path.read_text(encoding="utf-8"))
         assert config["model"] == "opencode/big-pickle"
 
     def test_updates_existing_config(self, tmp_path):
         config_path = tmp_path / "opencode.json"
-        config_path.write_text(json.dumps({"$schema": "...", "model": "old/model", "other": "kept"}))
+        config_path.write_text(json.dumps({"$schema": "...", "model": "old/model", "other": "kept"}), encoding="utf-8")
 
         _make_session(str(tmp_path), harness="opencode", LLM="opencode/big-pickle")
 
-        config = json.loads(config_path.read_text())
+        config = json.loads(config_path.read_text(encoding="utf-8"))
         assert config["model"] == "opencode/big-pickle"
         assert config["other"] == "kept"  # existing fields preserved
 
     def test_schema_key_preserved_on_creation(self, tmp_path):
         _make_session(str(tmp_path), harness="opencode", LLM="opencode/big-pickle")
-        config = json.loads((tmp_path / "opencode.json").read_text())
+        config = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
         assert "$schema" in config
 
     def test_non_opencode_harness_does_not_write_config(self, tmp_path):

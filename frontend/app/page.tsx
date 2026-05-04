@@ -13,6 +13,11 @@ import { HttpAgent } from "@ag-ui/client";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
+// Normalize Unicode strings to NFC (composed) form for consistent handling
+function normalizeSessionName(name: string): string {
+  return name.normalize("NFC");
+}
+
 type SessionStatus = "idle" | "thinking" | "tool_use" | "responding";
 
 const STATUS_CONFIG: Record<SessionStatus, { label: string; color: string; pulse: boolean }> = {
@@ -47,68 +52,69 @@ const DEFAULT_HARNESSES = [
 type ModelData = { groups: Record<string, string[]>; default: string };
 
 /* ------------------------------------------------------------------ */
-/*  Message persistence — saves/restores chat history per session      */
+/*  Message persistence — loads chat history from backend (acpx)       */
 /* ------------------------------------------------------------------ */
 
 const STORAGE_KEY_PREFIX = "chat_messages:";
 
-/**
- * Wrap an HttpAgent so every clone it produces:
- *  - restores messages from localStorage instead of starting empty
- *  - persists messages to localStorage on every change
- */
-function makePersistentAgent(base: HttpAgent, sessionName: string): HttpAgent {
-  const key = STORAGE_KEY_PREFIX + sessionName;
-  const origClone = base.clone.bind(base);
+type HistoryEntry = {
+  role: string;
+  content: string;
+  thinking?: string;
+};
 
-  base.clone = function () {
-    const clone = origClone();
+function HistoryLoader({ sessionName }: { sessionName: string }) {
+  const chatCfg = useCopilotChatConfiguration();
+  const { agent } = useAgent({
+    agentId: chatCfg?.agentId,
+    threadId: chatCfg?.threadId,
+  });
+  const loaded = useRef(false);
+  const normalizedName = normalizeSessionName(sessionName);
 
-    // --- restore: intercept the setMessages([]) that cloneForThread fires ---
-    const protoSetMessages = Object.getPrototypeOf(clone).setMessages.bind(clone);
-    let interceptClear = true;
-    clone.setMessages = function (msgs: any[]) {
-      if (interceptClear && msgs.length === 0) {
-        interceptClear = false;
-        try {
-          const stored = localStorage.getItem(key);
-          if (stored) {
-            const restored = JSON.parse(stored);
-            if (Array.isArray(restored) && restored.length > 0) {
-              protoSetMessages(restored);
-              return;
+  useEffect(() => {
+    if (loaded.current) return;
+    if (agent.messages.length > 0) {
+      loaded.current = true;
+      return;
+    }
+    loaded.current = true;
+
+    fetch(`${BACKEND}/sessions/${encodeURIComponent(normalizedName)}/history`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (!data?.entries?.length) return;
+        const msgs: { id: string; role: "user" | "assistant" | "reasoning"; content: string }[] = [];
+        (data.entries as HistoryEntry[]).forEach((e, i) => {
+          if (e.role === "assistant") {
+            if (e.thinking) {
+              msgs.push({
+                id: `history-${normalizedName}-${i}-think`,
+                role: "reasoning",
+                content: e.thinking,
+              });
             }
+            msgs.push({
+              id: `history-${normalizedName}-${i}`,
+              role: "assistant",
+              content: e.content || "",
+            });
+          } else {
+            msgs.push({
+              id: `history-${normalizedName}-${i}`,
+              role: "user",
+              content: e.content || "",
+            });
           }
-        } catch {}
-      }
-      interceptClear = false;
-      protoSetMessages(msgs);
-    };
+        });
+        if (msgs.length > 0 && agent.messages.length === 0) {
+          agent.setMessages(msgs);
+        }
+      })
+      .catch(() => {});
+  }, [agent, normalizedName]);
 
-    // --- save: property setter catches direct `this.messages = …` ---
-    let _msgs = clone.messages;
-    const save = () => {
-      try {
-        if (_msgs.length > 0) localStorage.setItem(key, JSON.stringify(_msgs));
-      } catch {}
-    };
-    Object.defineProperty(clone, "messages", {
-      get: () => _msgs,
-      set: (v) => { _msgs = v; save(); },
-      configurable: true,
-      enumerable: true,
-    });
-
-    // --- save: also catch in-place mutations via addMessage/addMessages ---
-    const protoAdd = Object.getPrototypeOf(clone).addMessage.bind(clone);
-    clone.addMessage = function (m: any) { protoAdd(m); save(); };
-    const protoAdds = Object.getPrototypeOf(clone).addMessages.bind(clone);
-    clone.addMessages = function (m: any[]) { protoAdds(m); save(); };
-
-    return clone;
-  };
-
-  return base;
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -120,6 +126,7 @@ type BroadcastSendFn = (text: string) => Promise<void>;
 const THREAD_KEY_PREFIX = "chat_thread:";
 
 function getOrCreateThreadId(sessionName: string): string {
+  sessionName = normalizeSessionName(sessionName);
   const key = THREAD_KEY_PREFIX + sessionName;
   const existing = localStorage.getItem(key);
   if (existing) return existing;
@@ -170,10 +177,11 @@ function ClearChatButton({ sessionName }: { sessionName: string }) {
     agentId: chatCfg?.agentId,
     threadId: chatCfg?.threadId,
   });
+  const normalizedName = normalizeSessionName(sessionName);
 
   const handleClear = () => {
     agent.setMessages([]);
-    localStorage.removeItem(STORAGE_KEY_PREFIX + sessionName);
+    localStorage.removeItem(STORAGE_KEY_PREFIX + normalizedName);
   };
 
   return (
@@ -205,14 +213,14 @@ function ChatPanel({
   onClose: () => void;
   onBroadcastReady?: (send: BroadcastSendFn) => void;
 }) {
-  const persistentAgent = useMemo(() => makePersistentAgent(agent, name), [agent, name]);
-  const agents = useMemo(() => ({ [name]: persistentAgent }), [name, persistentAgent]);
+  const agents = useMemo(() => ({ [name]: agent }), [name, agent]);
   const cfg = STATUS_CONFIG[status];
   const threadId = useMemo(() => getOrCreateThreadId(name), [name]);
 
   return (
     <CopilotKitProvider key={name} agents__unsafe_dev_only={agents}>
       <CopilotChatConfigurationProvider agentId={name} threadId={threadId}>
+        <HistoryLoader sessionName={name} />
         {onBroadcastReady && (
           <BroadcastReceiver onRegister={onBroadcastReady} />
         )}
@@ -356,18 +364,25 @@ export default function Home() {
   }, [refresh]);
 
   const openSessionNames = useMemo(() => {
-    const set = new Set<string>(sessions.registered);
-    for (const s of sessions.acpx) if (!s.closed) set.add(s.name);
+    const set = new Set<string>(sessions.registered.map(normalizeSessionName));
+    for (const s of sessions.acpx) if (!s.closed) set.add(normalizeSessionName(s.name));
     return Array.from(set);
   }, [sessions]);
 
-  // Build HttpAgent instances for all known sessions
+  // Build HttpAgent instances for all known sessions.
+  // Use a ref to keep existing instances stable — CopilotKit caches clones
+  // in a WeakMap keyed by agent identity, so recreating agents wipes messages.
+  const agentMapRef = useRef<Record<string, HttpAgent>>({});
   const agentMap = useMemo(() => {
-    const map: Record<string, HttpAgent> = {};
+    const prev = agentMapRef.current;
+    const next: Record<string, HttpAgent> = {};
     for (const name of openSessionNames) {
-      map[name] = new HttpAgent({ url: `${BACKEND}/agent/${encodeURIComponent(name)}` });
+      next[name] = prev[name] ?? new HttpAgent({
+        url: `${BACKEND}/agent/${encodeURIComponent(name)}`,
+      });
     }
-    return map;
+    agentMapRef.current = next;
+    return next;
   }, [openSessionNames]);
 
   // Toggle a session panel open/closed
@@ -386,23 +401,24 @@ export default function Home() {
     if (!formName.trim() || !formCwd.trim()) return;
     setCreating(true);
     try {
+      const normalizedName = normalizeSessionName(formName.trim());
+      console.log(`[handleCreate] original: "${formName.trim()}", normalized: "${normalizedName}"`);
       const res = await fetch(`${BACKEND}/sessions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json; charset=utf-8" },
         body: JSON.stringify({
-          name: formName.trim(),
+          name: normalizedName,
           agent_harness: formHarness,
           working_dir: formCwd.trim(),
           LLM: formLLM.trim() || undefined,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      const newName = formName.trim();
       setShowForm(false);
       setFormName("");
       await refresh();
       // Auto-open the new session panel
-      setOpenPanels((prev) => (prev.includes(newName) ? prev : [...prev, newName]));
+      setOpenPanels((prev) => (prev.includes(normalizedName) ? prev : [...prev, normalizedName]));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -411,13 +427,14 @@ export default function Home() {
   };
 
   const handleDelete = async (name: string) => {
+    const normalizedName = normalizeSessionName(name);
     if (!confirm(`Delete session '${name}'? This will remove all message history.`)) return;
     try {
-      const res = await fetch(`${BACKEND}/sessions/${encodeURIComponent(name)}`, { method: "DELETE" });
+      const res = await fetch(`${BACKEND}/sessions/${encodeURIComponent(normalizedName)}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      localStorage.removeItem(STORAGE_KEY_PREFIX + name);
-      localStorage.removeItem(THREAD_KEY_PREFIX + name);
-      closePanel(name);
+      localStorage.removeItem(STORAGE_KEY_PREFIX + normalizedName);
+      localStorage.removeItem(THREAD_KEY_PREFIX + normalizedName);
+      closePanel(normalizedName);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -579,7 +596,7 @@ export default function Home() {
         ) : (
           <ul className="space-y-1">
             {openSessionNames.map((name) => {
-              const meta = sessions.acpx.find((s) => s.name === name);
+              const meta = sessions.acpx.find((s) => normalizeSessionName(s.name) === name);
               const isPanelOpen = openPanels.includes(name);
               const status: SessionStatus = statusMap[name] || "idle";
               const statusCfg = STATUS_CONFIG[status];

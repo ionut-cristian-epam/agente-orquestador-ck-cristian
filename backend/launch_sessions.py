@@ -38,13 +38,13 @@ class Session:
             )
         config_path = os.path.join(self.working_dir, file)
         if os.path.exists(config_path):
-            with open(config_path, "r") as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
         else:
             config = {"$schema": "https://opencode.ai/config.json"}
         config["model"] = self.LLM
-        with open(config_path, "w") as f:
-            json.dump(config, f, indent=2)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
 
     def _run(self, cmd, capture_output=False):
         output_lines = []
@@ -53,6 +53,8 @@ class Session:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             shell=(sys.platform == "win32"),
             cwd=self.working_dir,
         ) as proc:
@@ -230,6 +232,61 @@ class Session:
             self._ensure_connected()
             async for item in self.stream_prompt(prompt, _reconnect_attempt=_reconnect_attempt + 1):
                 yield item
+
+    def read_history(self, tail: int | None = None) -> list[dict]:
+        """Return structured message history from acpx session.
+
+        Uses `sessions list` which returns full message content including
+        separate Thinking/Text blocks, unlike `sessions read` which only
+        gives a flat textPreview.
+        """
+        cmd = ["acpx", "--format", "json", self.agent_harness, "sessions", "list"]
+        raw = self._run(cmd, capture_output=True)
+        if not raw:
+            return []
+        try:
+            sessions = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        session_data = None
+        for s in (sessions if isinstance(sessions, list) else []):
+            if s.get("name") == self.name:
+                session_data = s
+                break
+        if not session_data:
+            return []
+        raw_msgs = session_data.get("messages", [])
+        result = []
+        for msg in raw_msgs:
+            if "User" in msg:
+                user = msg["User"]
+                parts = user.get("content", [])
+                text = "".join(
+                    p if isinstance(p, str) else p.get("Text", "")
+                    for p in parts
+                )
+                result.append({"role": "user", "content": text})
+            elif "Agent" in msg:
+                agent = msg["Agent"]
+                parts = agent.get("content", [])
+                thinking = ""
+                text = ""
+                for p in parts:
+                    if isinstance(p, dict):
+                        if "Thinking" in p:
+                            thinking = p["Thinking"].get("text", "")
+                        elif "Text" in p:
+                            text += p["Text"]
+                    elif isinstance(p, str):
+                        text += p
+                result.append({
+                    "role": "assistant",
+                    "content": text,
+                    **({"thinking": thinking} if thinking else {}),
+                })
+        if tail is not None and tail > 0:
+            result = result[-tail:]
+        return result
 
     def close_session(self):
         print(f"\n--- Closing session: {self.name} ---")

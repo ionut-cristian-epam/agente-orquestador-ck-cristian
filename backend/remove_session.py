@@ -18,7 +18,7 @@ def _load_index(path: Path) -> dict:
 
 def _save_index(path: Path, index: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2)
+        json.dump(index, f, indent=2, ensure_ascii=False)
 
 
 def remove_all_sessions():

@@ -6,8 +6,16 @@ Endpoints:
   POST /sessions          Create a new persistent session
   DELETE /sessions/{name} Close a session
 """
+import sys
+# Force UTF-8 encoding for all I/O
+if sys.stdout.encoding != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+if sys.stderr.encoding != "utf-8":
+    sys.stderr.reconfigure(encoding="utf-8")
+
 import json
 import os
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,8 +25,21 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
+
+# Custom JSON response to ensure UTF-8 encoding with proper headers
+class UnicodeJSONResponse(JSONResponse):
+    media_type = "application/json; charset=utf-8"
+    
+    def render(self, content) -> bytes:
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
 
 from ag_ui.core import (
     RunAgentInput,
@@ -48,6 +69,10 @@ PROJECT_ROOT = Path(
 SESSIONS_DIR = PROJECT_ROOT / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
 
+# Directory for our own message history (preserves formatting lost by acpx)
+HISTORY_DIR = SESSIONS_DIR / "history"
+HISTORY_DIR.mkdir(exist_ok=True)
+
 # Legacy fallback: acpx still writes to ~/.acpx/sessions
 ACPX_SESSIONS_DIR = Path.home() / ".acpx" / "sessions"
 
@@ -56,6 +81,32 @@ _sessions: dict[str, Session] = {}
 # Per-session activity status: "idle" | "thinking" | "tool_use" | "responding"
 _session_status: dict[str, str] = {}
 
+
+def _history_path(name: str) -> Path:
+    """Return path to our own history file for a session."""
+    safe = name.replace("/", "_").replace("\\", "_")
+    return HISTORY_DIR / f"{safe}.json"
+
+
+def _load_own_history(name: str) -> list[dict] | None:
+    """Load our own saved history for a session, or None if not available."""
+    p = _history_path(name)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data.get("messages", [])
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_own_history(name: str, messages: list[dict]) -> None:
+    """Save messages to our own history file for a session."""
+    p = _history_path(name)
+    p.write_text(
+        json.dumps({"messages": messages}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 def _is_inside_project(cwd: Optional[str]) -> bool:
     if not cwd:
@@ -70,6 +121,11 @@ KNOWN_HARNESSES = (
     "kiro", "qwen", "kimi", "kilocode", "iflow", "droid", "openclaw",
     "pi", "qoder", "trae",
 )
+
+
+def _normalize_name(name: str) -> str:
+    """Normalize session names to NFC form for consistent handling of Unicode characters."""
+    return unicodedata.normalize("NFC", name)
 
 
 class CreateSessionRequest(BaseModel):
@@ -90,19 +146,21 @@ def _load_local_index() -> dict:
 def _save_local_index(index: dict) -> None:
     index_path = SESSIONS_DIR / "index.json"
     with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2)
+        json.dump(index, f, indent=2, ensure_ascii=False)
 
 
 def _add_to_local_index(entry: dict) -> None:
+    entry_name = _normalize_name(entry.get("name", ""))
     index = _load_local_index()
-    index["entries"] = [e for e in index["entries"] if e.get("name") != entry["name"]]
+    index["entries"] = [e for e in index["entries"] if _normalize_name(e.get("name", "")) != entry_name]
     index["entries"].append(entry)
     _save_local_index(index)
 
 
 def _remove_from_local_index(name: str) -> None:
+    name = _normalize_name(name)
     index = _load_local_index()
-    index["entries"] = [e for e in index["entries"] if e.get("name") != name]
+    index["entries"] = [e for e in index["entries"] if _normalize_name(e.get("name", "")) != name]
     _save_local_index(index)
 
 
@@ -115,12 +173,13 @@ def _load_acpx_index() -> dict:
 
 
 def _find_session_entry(name: str) -> Optional[dict]:
+    name = _normalize_name(name)
     for entry in _load_local_index().get("entries", []):
-        if entry.get("name") == name and not entry.get("closed"):
+        if _normalize_name(entry.get("name", "")) == name and not entry.get("closed"):
             return entry
     for entry in _load_acpx_index().get("entries", []):
         if (
-            entry.get("name") == name
+            _normalize_name(entry.get("name", "")) == name
             and not entry.get("closed")
             and _is_inside_project(entry.get("cwd"))
         ):
@@ -147,6 +206,7 @@ def _attach_existing(name: str) -> Optional[Session]:
 
 
 def _get_or_attach(name: str) -> Session:
+    name = _normalize_name(name)
     if name in _sessions:
         return _sessions[name]
     sess = _attach_existing(name)
@@ -162,7 +222,10 @@ def _get_or_attach(name: str) -> Session:
     return sess
 
 
-app = FastAPI(title="agent-harness-orchestrator AG-UI bridge")
+app = FastAPI(
+    title="agent-harness-orchestrator AG-UI bridge",
+    default_response_class=UnicodeJSONResponse
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.environ.get(
@@ -208,20 +271,23 @@ def list_sessions():
 
 @app.post("/sessions")
 def create_session(req: CreateSessionRequest):
-    if req.name in _sessions:
-        return {"status": "exists", "name": req.name}
+    normalized_name = _normalize_name(req.name)
+    print(f"[create_session] received name: {req.name!r} (len={len(req.name)})", flush=True)
+    print(f"[create_session] normalized name: {normalized_name!r} (len={len(normalized_name)})", flush=True)
+    if normalized_name in _sessions:
+        return {"status": "exists", "name": normalized_name}
     kwargs = dict(
         agent_harness=req.agent_harness,
-        name=req.name,
+        name=normalized_name,
         working_dir=req.working_dir,
         capture_output=True,
     )
     if req.LLM:
         kwargs["LLM"] = req.LLM
     sess = Session(**kwargs)
-    _sessions[req.name] = sess
+    _sessions[normalized_name] = sess
     _add_to_local_index({
-        "name": req.name,
+        "name": normalized_name,
         "agent_harness": req.agent_harness,
         "cwd": req.working_dir,
         "LLM": req.LLM,
@@ -229,7 +295,7 @@ def create_session(req: CreateSessionRequest):
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "lastUsedAt": datetime.now(timezone.utc).isoformat(),
     })
-    return {"status": "created", "name": req.name}
+    return {"status": "created", "name": normalized_name}
 
 
 @app.get("/sessions/status")
@@ -238,8 +304,28 @@ def session_status():
     return {name: _session_status.get(name, "idle") for name in _sessions}
 
 
+@app.get("/sessions/{name}/history")
+def get_session_history(name: str, tail: Optional[int] = None):
+    """Return conversation history, preferring our own saved copy (preserves formatting)."""
+    sess = _get_or_attach(name)
+    normalized = _normalize_name(name)
+
+    # Try our own history first (preserves markdown newlines)
+    own = _load_own_history(normalized)
+    if own is not None:
+        entries = own
+    else:
+        # Fallback to acpx (may have stripped newlines)
+        entries = sess.read_history(tail=None)
+
+    if tail is not None and tail > 0:
+        entries = entries[-tail:]
+    return {"session": name, "entries": entries}
+
+
 @app.delete("/sessions/{name}")
 def delete_session(name: str):
+    name = _normalize_name(name)
     sess = _sessions.pop(name, None)
     _session_status.pop(name, None)
     if sess is None:
@@ -251,6 +337,10 @@ def delete_session(name: str):
         sess.close_session()
     except Exception:
         pass
+    # Clean up our own history file
+    hp = _history_path(name)
+    if hp.exists():
+        hp.unlink()
     _remove_from_local_index(name)
     return {"status": "deleted"}
 
@@ -312,6 +402,10 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
         # Track open tool calls: toolCallId -> toolCallName
         open_tool_calls: dict[str, str] = {}
 
+        # Accumulate streamed content to save history with proper formatting
+        accumulated_text = []
+        accumulated_thinking = []
+
         _session_status[name] = "thinking"
         yield encoder.encode(RunStartedEvent(
             thread_id=input_data.thread_id,
@@ -325,6 +419,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                     # Use explicit lifecycle (no chunk transformer for reasoning)
                     if isinstance(ev, ReasoningMessageChunkEvent):
                         _session_status[name] = "thinking"
+                        accumulated_thinking.append(ev.delta)
                         if not reasoning_started:
                             yield encoder.encode(ReasoningMessageStartEvent(
                                 messageId=reasoning_id,
@@ -369,6 +464,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                     # with TEXT_MESSAGE_START/CONTENT/END — do NOT send manual lifecycle events
                     if isinstance(ev, TextMessageChunkEvent):
                         _session_status[name] = "responding"
+                        accumulated_text.append(ev.delta)
                         if reasoning_started:
                             yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
                             reasoning_started = False
@@ -388,6 +484,18 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                 yield encoder.encode(ToolCallEndEvent(toolCallId=tc_id))
 
             _session_status[name] = "idle"
+
+            # Save accumulated content to our own history (preserves formatting)
+            normalized = _normalize_name(name)
+            existing = _load_own_history(normalized) or []
+            existing.append({"role": "user", "content": prompt})
+            assistant_entry = {"role": "assistant", "content": "".join(accumulated_text)}
+            thinking_text = "".join(accumulated_thinking)
+            if thinking_text:
+                assistant_entry["thinking"] = thinking_text
+            existing.append(assistant_entry)
+            _save_own_history(normalized, existing)
+
             yield encoder.encode(RunFinishedEvent(
                 thread_id=input_data.thread_id,
                 run_id=input_data.run_id,

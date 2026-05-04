@@ -25,6 +25,17 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+/* Restore list styles inside CopilotKit markdown (Tailwind preflight resets them) */
+.copilotKitMarkdown ol {
+  list-style-type: decimal;
+  padding-left: 20px;
+}
+
+.copilotKitMarkdown ul {
+  list-style-type: disc;
+  padding-left: 20px;
+}
+
 /* Ensure CopilotChat fills its container and scrolls internally */
 [data-copilotkit-chat],
 .copilotKitChat {

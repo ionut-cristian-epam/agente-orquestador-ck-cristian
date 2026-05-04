@@ -16,26 +16,26 @@ from remove_session import remove_session, remove_all_sessions
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_acpx_index(sessions_dir: Path, entries: list[dict], files: list[str] | None = None):
+def _make_acpx_index(sessions_dir: Path, entries: list[dict], files=None):
     if files is None:
         files = [f"{e['acpxRecordId']}.json" for e in entries]
     index = {"entries": entries, "files": files}
     index_path = sessions_dir / "index.json"
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    index_path.write_text(json.dumps(index))
+    index_path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
 
 
 def _make_local_index(sessions_dir: Path, entries: list[dict]):
     index = {"schema": "orchestrator.session-index.v1", "entries": entries}
     index_path = sessions_dir / "index.json"
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    index_path.write_text(json.dumps(index))
+    index_path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
 
 
 def _make_session_files(sessions_dir: Path, entry: dict):
     sid = entry["acpxRecordId"]
-    (sessions_dir / f"{sid}.json").write_text(json.dumps({"data": "session"}))
-    (sessions_dir / f"{sid}.stream.ndjson").write_text('{"line":1}\n{"line":2}\n')
+    (sessions_dir / f"{sid}.json").write_text(json.dumps({"data": "session"}, ensure_ascii=False), encoding="utf-8")
+    (sessions_dir / f"{sid}.stream.ndjson").write_text('{"line":1}\n{"line":2}\n', encoding="utf-8")
 
 
 def _sample_entry(name: str = "test-session", sid: str = "abc123", closed: bool = False):
@@ -75,7 +75,7 @@ class TestRemoveSession:
 
             assert result is True
             assert not (acpx / f"{entry['acpxRecordId']}.json").exists()
-            updated = json.loads((acpx / "index.json").read_text())
+            updated = json.loads((acpx / "index.json").read_text(encoding="utf-8"))
             assert updated["entries"] == []
 
     def test_removes_session_from_local_index(self):
@@ -90,7 +90,7 @@ class TestRemoveSession:
                 result = remove_session("my-sess")
 
             assert result is True
-            updated = json.loads((local / "index.json").read_text())
+            updated = json.loads((local / "index.json").read_text(encoding="utf-8"))
             assert updated["entries"] == []
 
     def test_returns_false_when_not_found(self):
@@ -121,7 +121,7 @@ class TestRemoveSession:
                 result = remove_session("remove-me")
 
             assert result is True
-            updated = json.loads((acpx / "index.json").read_text())
+            updated = json.loads((acpx / "index.json").read_text(encoding="utf-8"))
             assert len(updated["entries"]) == 1
             assert updated["entries"][0]["name"] == "keep-me"
 
@@ -138,6 +138,29 @@ class TestRemoveSession:
             with p1, p2:
                 result = remove_session(entry["name"])
             assert result is True
+
+    def test_handles_special_characters_in_session_names(self):
+        """Test that session names with special Unicode characters are preserved."""
+        with tempfile.TemporaryDirectory() as tmp:
+            acpx = Path(tmp) / "acpx"
+            local = Path(tmp) / "local"
+            # Test with Spanish characters (ñ, á, é, etc.)
+            special_name = "España_sesión_café"
+            entry = _sample_entry(name=special_name, sid="special123")
+            _make_acpx_index(acpx, [entry])
+            _make_session_files(acpx, entry)
+            _make_local_index(local, [])
+
+            p1, p2 = _patched(local, acpx)
+            with p1, p2:
+                result = remove_session(special_name)
+
+            assert result is True
+            assert not (acpx / f"{entry['acpxRecordId']}.json").exists()
+            updated = json.loads((acpx / "index.json").read_text(encoding="utf-8"))
+            assert updated["entries"] == []
+            # Verify the special characters are preserved correctly
+            assert all(e["name"] != special_name for e in updated["entries"])
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +184,8 @@ class TestRemoveAllSessions:
                 result = remove_all_sessions()
 
             assert result is True
-            assert json.loads((acpx / "index.json").read_text())["entries"] == []
-            assert json.loads((local / "index.json").read_text())["entries"] == []
+            assert json.loads((acpx / "index.json").read_text(encoding="utf-8"))["entries"] == []
+            assert json.loads((local / "index.json").read_text(encoding="utf-8"))["entries"] == []
 
     def test_returns_true_when_no_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -190,7 +213,7 @@ class TestRemoveAllSessions:
                 result = remove_all_sessions()
 
             assert result is True
-            updated = json.loads((acpx / "index.json").read_text())
+            updated = json.loads((acpx / "index.json").read_text(encoding="utf-8"))
             assert updated["files"] == ["other-log.txt"]
 
     def test_file_deletion_failure_returns_false(self):
