@@ -93,6 +93,8 @@ class Session:
             return self._filter_output(raw)
         return raw
 
+    STREAM_IDLE_TIMEOUT = 60  # seconds with no output before killing subprocess
+
     async def stream_prompt(self, prompt: str) -> AsyncIterator[dict]:
         """Stream ACP JSON-RPC events from acpx as parsed dicts.
 
@@ -103,6 +105,8 @@ class Session:
         limitations with asyncio.create_subprocess_*.
         """
         import queue as _queue
+        import time
+        import threading
 
         cmd = [
             "acpx", "--format", "json",
@@ -111,6 +115,17 @@ class Session:
         ]
 
         q: _queue.Queue[dict | None] = _queue.Queue()
+        last_output_time = time.monotonic()
+        last_output_lock = threading.Lock()
+
+        def _update_last_output():
+            nonlocal last_output_time
+            with last_output_lock:
+                last_output_time = time.monotonic()
+
+        def _seconds_since_last_output() -> float:
+            with last_output_lock:
+                return time.monotonic() - last_output_time
 
         def _run_in_thread():
             proc = subprocess.Popen(
@@ -122,17 +137,42 @@ class Session:
                 shell=(sys.platform == "win32"),
                 cwd=self.working_dir,
             )
-            assert proc.stdin and proc.stdout
+            assert proc.stdin and proc.stdout and proc.stderr
             proc.stdin.write(prompt.encode("utf-8"))
             proc.stdin.flush()
             proc.stdin.close()
 
+            def _drain_stderr():
+                for err_line in proc.stderr:
+                    decoded = err_line.decode("utf-8", errors="replace").rstrip()
+                    if decoded:
+                        print(f"[acpx stderr][{self.name}] {decoded}", flush=True)
+
+            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+
             for raw_line in proc.stdout:
+                _update_last_output()
+                line_str = raw_line.decode("utf-8", errors="replace").rstrip()
+                if not line_str:
+                    continue
                 try:
-                    obj = json.loads(raw_line.decode("utf-8", errors="replace"))
+                    obj = json.loads(line_str)
                     q.put(obj)
                 except json.JSONDecodeError:
+                    print(f"[acpx non-JSON][{self.name}] {line_str[:300]}", flush=True)
                     continue
+
+            stderr_thread.join(timeout=5)
+
+            stderr_output = b""
+            try:
+                stderr_output = proc.stderr.read()
+            except Exception:
+                pass
+            if stderr_output:
+                print(f"[acpx stderr][{self.name}] {stderr_output.decode('utf-8', errors='replace').rstrip()}", flush=True)
+
             proc.wait()
             q.put(None)  # sentinel
 
@@ -152,6 +192,14 @@ class Session:
             if item is _sentinel:
                 if fut.done():
                     break
+                if _seconds_since_last_output() > self.STREAM_IDLE_TIMEOUT:
+                    print(
+                        f"[stream_prompt][{self.name}] No output for {self.STREAM_IDLE_TIMEOUT}s, killing subprocess",
+                        flush=True,
+                    )
+                    raise TimeoutError(
+                        f"Session '{self.name}' produced no output for {self.STREAM_IDLE_TIMEOUT}s"
+                    )
                 continue
             if item is None:
                 break

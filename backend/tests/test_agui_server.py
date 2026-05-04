@@ -107,7 +107,7 @@ class TestDeleteSession:
             res = client.delete("/sessions/to_delete")
 
         assert res.status_code == 200
-        assert res.json()["status"] == "closed"
+        assert res.json()["status"] == "deleted"
         sess.close_session.assert_called_once()
         assert "to_delete" not in _sessions
 
