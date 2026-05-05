@@ -1,305 +1,27 @@
 "use client";
 
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import {
-  CopilotKitProvider,
-  CopilotChat,
-  CopilotChatConfigurationProvider,
-  useCopilotChatConfiguration,
-  useAgent,
-  useCopilotKit,
-} from "@copilotkit/react-core/v2";
 import { HttpAgent } from "@ag-ui/client";
-
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
-
-// Normalize Unicode strings to NFC (composed) form for consistent handling
-function normalizeSessionName(name: string): string {
-  return name.normalize("NFC");
-}
-
-type SessionStatus = "idle" | "thinking" | "tool_use" | "responding";
-type SessionHealth = "connected" | "disconnected" | "reconnecting";
-
-const STATUS_CONFIG: Record<SessionStatus, { label: string; color: string; pulse: boolean }> = {
-  idle:       { label: "Idle",       color: "bg-zinc-400", pulse: false },
-  thinking:   { label: "Thinking",   color: "bg-yellow-400", pulse: true },
-  tool_use:   { label: "Tool use",   color: "bg-blue-400", pulse: true },
-  responding: { label: "Responding", color: "bg-green-400", pulse: true },
-};
-
-const HEALTH_CONFIG: Record<SessionHealth, { label: string; color: string; pulse: boolean }> = {
-  connected:    { label: "",              color: "",             pulse: false },
-  disconnected: { label: "Disconnected",  color: "bg-red-500",  pulse: false },
-  reconnecting: { label: "Reconnecting",  color: "bg-amber-400", pulse: true },
-};
-
-type AcpxSession = {
-  name: string;
-  cwd: string;
-  closed: boolean;
-  lastUsedAt: string | null;
-};
-
-type SessionsResponse = {
-  projectRoot?: string;
-  registered: string[];
-  acpx: AcpxSession[];
-};
-
-const DEFAULT_HARNESSES = [
-  "opencode",
-  "claude",
-  "codex",
-  "gemini",
-  "cursor",
-  "copilot",
-];
-
-type ModelData = { groups: Record<string, string[]>; default: string };
-
-/* ------------------------------------------------------------------ */
-/*  Message persistence — loads chat history from backend (acpx)       */
-/* ------------------------------------------------------------------ */
-
-const STORAGE_KEY_PREFIX = "chat_messages:";
-
-type HistoryEntry = {
-  role: string;
-  content: string;
-  thinking?: string;
-};
-
-function HistoryLoader({ sessionName }: { sessionName: string }) {
-  const chatCfg = useCopilotChatConfiguration();
-  const { agent } = useAgent({
-    agentId: chatCfg?.agentId,
-    threadId: chatCfg?.threadId,
-  });
-  const loaded = useRef(false);
-  const normalizedName = normalizeSessionName(sessionName);
-
-  useEffect(() => {
-    if (loaded.current) return;
-    if (agent.messages.length > 0) {
-      loaded.current = true;
-      return;
-    }
-    loaded.current = true;
-
-    fetch(`${BACKEND}/sessions/${encodeURIComponent(normalizedName)}/history`)
-      .then((r) => r.ok ? r.json() : null)
-      .then((data) => {
-        if (!data?.entries?.length) return;
-        const msgs: { id: string; role: "user" | "assistant" | "reasoning"; content: string }[] = [];
-        (data.entries as HistoryEntry[]).forEach((e, i) => {
-          if (e.role === "assistant") {
-            if (e.thinking) {
-              msgs.push({
-                id: `history-${normalizedName}-${i}-think`,
-                role: "reasoning",
-                content: e.thinking,
-              });
-            }
-            msgs.push({
-              id: `history-${normalizedName}-${i}`,
-              role: "assistant",
-              content: e.content || "",
-            });
-          } else {
-            msgs.push({
-              id: `history-${normalizedName}-${i}`,
-              role: "user",
-              content: e.content || "",
-            });
-          }
-        });
-        if (msgs.length > 0 && agent.messages.length === 0) {
-          agent.setMessages(msgs);
-        }
-      })
-      .catch(() => {});
-  }, [agent, normalizedName]);
-
-  return null;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Broadcast — inject a prompt into a CopilotChat panel               */
-/* ------------------------------------------------------------------ */
-
-type BroadcastSendFn = (text: string) => Promise<void>;
-
-const THREAD_KEY_PREFIX = "chat_thread:";
-
-function getOrCreateThreadId(sessionName: string): string {
-  sessionName = normalizeSessionName(sessionName);
-  const key = THREAD_KEY_PREFIX + sessionName;
-  const existing = localStorage.getItem(key);
-  if (existing) return existing;
-  const id = crypto.randomUUID();
-  localStorage.setItem(key, id);
-  return id;
-}
-
-function BroadcastReceiver({
-  onRegister,
-}: {
-  onRegister: (send: BroadcastSendFn) => void;
-}) {
-  const chatCfg = useCopilotChatConfiguration();
-  const { agent } = useAgent({
-    agentId: chatCfg?.agentId,
-    threadId: chatCfg?.threadId,
-  });
-  const { copilotkit } = useCopilotKit();
-  const agentRef = useRef(agent);
-  const ckRef = useRef(copilotkit);
-
-  useEffect(() => { agentRef.current = agent; }, [agent]);
-  useEffect(() => { ckRef.current = copilotkit; }, [copilotkit]);
-
-  useEffect(() => {
-    onRegister(async (text: string) => {
-      const a = agentRef.current;
-      a.addMessage({
-        id: crypto.randomUUID(),
-        role: "user" as const,
-        content: text,
-      });
-      await ckRef.current.runAgent({ agent: a });
-    });
-  }, [onRegister]);
-
-  return null;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Clear chat — wipe agent messages + localStorage                    */
-/* ------------------------------------------------------------------ */
-
-function ClearChatButton({ sessionName }: { sessionName: string }) {
-  const chatCfg = useCopilotChatConfiguration();
-  const { agent } = useAgent({
-    agentId: chatCfg?.agentId,
-    threadId: chatCfg?.threadId,
-  });
-  const normalizedName = normalizeSessionName(sessionName);
-
-  const handleClear = () => {
-    agent.setMessages([]);
-    localStorage.removeItem(STORAGE_KEY_PREFIX + normalizedName);
-  };
-
-  return (
-    <button
-      onClick={handleClear}
-      className="text-xs opacity-50 hover:opacity-100 px-1.5 py-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800"
-      title="Clear chat history"
-    >
-      Clear
-    </button>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Chat panel — each has its own CopilotKitProvider so they stream    */
-/*  independently from different backend sessions.                     */
-/* ------------------------------------------------------------------ */
-
-function ChatPanel({
-  name,
-  agent,
-  status,
-  health,
-  onClose,
-  onBroadcastReady,
-  onReconnect,
-}: {
-  name: string;
-  agent: HttpAgent;
-  status: SessionStatus;
-  health: SessionHealth;
-  onClose: () => void;
-  onBroadcastReady?: (send: BroadcastSendFn) => void;
-  onReconnect: () => void;
-}) {
-  const agents = useMemo(() => ({ [name]: agent }), [name, agent]);
-  const cfg = STATUS_CONFIG[status];
-  const healthCfg = HEALTH_CONFIG[health];
-  const threadId = useMemo(() => getOrCreateThreadId(name), [name]);
-
-  const dotColor = health !== "connected" ? healthCfg.color : cfg.color;
-  const dotPulse = health !== "connected" ? healthCfg.pulse : cfg.pulse;
-
-  return (
-    <CopilotKitProvider key={name} agents__unsafe_dev_only={agents}>
-      <CopilotChatConfigurationProvider agentId={name} threadId={threadId}>
-        <HistoryLoader sessionName={name} />
-        {onBroadcastReady && (
-          <BroadcastReceiver onRegister={onBroadcastReady} />
-        )}
-        <div className="flex flex-col h-full min-w-0 overflow-hidden border-r last:border-r-0 border-zinc-200 dark:border-zinc-800">
-          <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 shrink-0">
-            <span className="font-mono text-sm font-medium truncate flex items-center gap-1.5">
-              <span
-                className={`inline-block w-2 h-2 rounded-full shrink-0 ${dotColor} ${dotPulse ? "animate-pulse" : ""}`}
-                title={health !== "connected" ? healthCfg.label : cfg.label}
-              />
-              {name}
-              {health === "disconnected" && (
-                <span className="text-xs font-normal text-red-500 ml-1 flex items-center gap-1">
-                  Disconnected
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onReconnect(); }}
-                    className="underline hover:no-underline"
-                  >
-                    Retry
-                  </button>
-                </span>
-              )}
-              {health === "reconnecting" && (
-                <span className="text-xs font-normal text-amber-500 ml-1">
-                  Reconnecting...
-                </span>
-              )}
-              {health === "connected" && status !== "idle" && (
-                <span className="text-xs font-normal opacity-60 ml-1">{cfg.label}</span>
-              )}
-            </span>
-            <span className="flex items-center gap-1">
-              <ClearChatButton sessionName={name} />
-              <button
-                onClick={onClose}
-                className="text-xs opacity-50 hover:opacity-100 px-1.5 py-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800"
-                title="Close panel"
-              >
-                ✕
-              </button>
-            </span>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            <CopilotChat
-              agentId={name}
-              labels={{ chatInputPlaceholder: `Message ${name}...` }}
-            />
-          </div>
-        </div>
-      </CopilotChatConfigurationProvider>
-    </CopilotKitProvider>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Main page                                                          */
-/* ------------------------------------------------------------------ */
+import {
+  type SessionsResponse,
+  type StatusEntry,
+  type BroadcastSendFn,
+  BACKEND,
+  STORAGE_KEY_PREFIX,
+  THREAD_KEY_PREFIX,
+  normalizeSessionName,
+} from "./types";
+import { Sidebar } from "./components/Sidebar";
+import { ChatPanel } from "./components/ChatPanel";
 
 export default function Home() {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   const [sessions, setSessions] = useState<SessionsResponse>({ registered: [], acpx: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Open panels — ordered list of session names currently displayed
   const [openPanels, setOpenPanels] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     try {
@@ -314,35 +36,6 @@ export default function Home() {
     localStorage.setItem("openPanels", JSON.stringify(openPanels));
   }, [openPanels]);
 
-  const [showForm, setShowForm] = useState(false);
-  const [formName, setFormName] = useState("");
-  const [formHarness, setFormHarness] = useState("opencode");
-  const [formCwd, setFormCwd] = useState("");
-  const [formLLM, setFormLLM] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [modelData, setModelData] = useState<ModelData | null>(null);
-  const [loadingModels, setLoadingModels] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingModels(true);
-    fetch(`${BACKEND}/models/${encodeURIComponent(formHarness)}`)
-      .then((r) => r.json())
-      .then((data: ModelData) => {
-        if (cancelled) return;
-        setModelData(data);
-        setFormLLM((cur) => {
-          const allModels = Object.values(data.groups).flat();
-          if (cur && allModels.includes(cur)) return cur;
-          return data.default || "";
-        });
-      })
-      .catch(() => { if (!cancelled) setModelData(null); })
-      .finally(() => { if (!cancelled) setLoadingModels(false); });
-    return () => { cancelled = true; };
-  }, [formHarness]);
-
-  // Broadcast prompt
   const [broadcastText, setBroadcastText] = useState("");
   const [broadcasting, setBroadcasting] = useState(false);
   const broadcastFnsRef = useRef<Map<string, BroadcastSendFn>>(new Map());
@@ -353,9 +46,6 @@ export default function Home() {
     };
   }, []);
 
-
-  // Session status polling (activity + health)
-  type StatusEntry = { activity: SessionStatus; health: SessionHealth };
   const [statusMap, setStatusMap] = useState<Record<string, StatusEntry>>({});
   const statusIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -374,7 +64,6 @@ export default function Home() {
     };
   }, [fetchStatus]);
 
-  // Reconnect a disconnected session
   const reconnectSession = useCallback(async (name: string) => {
     try {
       await fetch(`${BACKEND}/sessions/${encodeURIComponent(name)}/reconnect`, {
@@ -384,7 +73,6 @@ export default function Home() {
     fetchStatus();
   }, [fetchStatus]);
 
-  // Auto-reconnect with 10s cooldown per session
   const reconnectCooldowns = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     const now = Date.now();
@@ -406,9 +94,6 @@ export default function Home() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: SessionsResponse = await res.json();
       setSessions(data);
-      if (data.projectRoot) {
-        setFormCwd((cur) => cur || data.projectRoot!);
-      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -426,9 +111,8 @@ export default function Home() {
     return Array.from(set);
   }, [sessions]);
 
-  // Build HttpAgent instances for all known sessions.
-  // Use a ref to keep existing instances stable — CopilotKit caches clones
-  // in a WeakMap keyed by agent identity, so recreating agents wipes messages.
+  const defaultCwd = useMemo(() => sessions.projectRoot || "", [sessions.projectRoot]);
+
   const agentMapRef = useRef<Record<string, HttpAgent>>({});
   const agentMap = useMemo(() => {
     const prev = agentMapRef.current;
@@ -442,7 +126,6 @@ export default function Home() {
     return next;
   }, [openSessionNames]);
 
-  // Toggle a session panel open/closed
   const togglePanel = (name: string) => {
     setOpenPanels((prev) =>
       prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
@@ -453,34 +136,20 @@ export default function Home() {
     setOpenPanels((prev) => prev.filter((n) => n !== name));
   };
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formName.trim() || !formCwd.trim()) return;
-    setCreating(true);
-    try {
-      const normalizedName = normalizeSessionName(formName.trim());
-      console.log(`[handleCreate] original: "${formName.trim()}", normalized: "${normalizedName}"`);
-      const res = await fetch(`${BACKEND}/sessions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: JSON.stringify({
-          name: normalizedName,
-          agent_harness: formHarness,
-          working_dir: formCwd.trim(),
-          LLM: formLLM.trim() || undefined,
-        }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      setShowForm(false);
-      setFormName("");
-      await refresh();
-      // Auto-open the new session panel
-      setOpenPanels((prev) => (prev.includes(normalizedName) ? prev : [...prev, normalizedName]));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCreating(false);
-    }
+  const handleCreate = async (data: { name: string; harness: string; cwd: string; llm: string }) => {
+    const res = await fetch(`${BACKEND}/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({
+        name: data.name,
+        agent_harness: data.harness,
+        working_dir: data.cwd,
+        LLM: data.llm || undefined,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    await refresh();
+    setOpenPanels((prev) => (prev.includes(data.name) ? prev : [...prev, data.name]));
   };
 
   const handleDelete = async (name: string) => {
@@ -498,18 +167,13 @@ export default function Home() {
     }
   };
 
-  // Filter panels to only those that still exist
   const activePanels = openPanels.filter((n) => n in agentMap);
-
-  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   const [broadcastError, setBroadcastError] = useState<string | null>(null);
 
-  const handleBroadcast = async () => {
-    const text = broadcastText.trim();
+  const handleBroadcast = async (text: string) => {
     if (!text || activePanels.length === 0) return;
     setBroadcasting(true);
-    setBroadcastText("");
     setBroadcastError(null);
     try {
       const fns = activePanels.map((name) => ({
@@ -542,230 +206,27 @@ export default function Home() {
 
   return (
     <div className="flex h-screen">
-      {/* ---- Sidebar ---- */}
-      <aside
-        className={`border-r border-zinc-200 dark:border-zinc-800 overflow-y-auto flex flex-col shrink-0 transition-[width] duration-200 ${
-          sidebarOpen ? "w-[360px] p-5" : "w-10 py-2 px-1"
-        }`}
-      >
-        <div className={`flex items-center mb-3 ${sidebarOpen ? "justify-between" : "justify-center"}`}>
-          {sidebarOpen && <h1 className="text-lg font-semibold whitespace-nowrap">Agent Sessions</h1>}
-          <button
-            onClick={() => setSidebarOpen((v) => !v)}
-            className="px-2 py-1 text-sm rounded hover:bg-zinc-200 dark:hover:bg-zinc-800 shrink-0"
-            title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-          >
-            {sidebarOpen ? "«" : "»"}
-          </button>
-        </div>
+      <Sidebar
+        mounted={mounted}
+        sessions={sessions}
+        openPanels={openPanels}
+        statusMap={statusMap}
+        activePanels={activePanels}
+        openSessionNames={openSessionNames}
+        loading={loading}
+        error={error}
+        defaultCwd={defaultCwd}
+        broadcasting={broadcasting}
+        broadcastError={broadcastError}
+        onRefresh={refresh}
+        onTogglePanel={togglePanel}
+        onDeleteSession={handleDelete}
+        onCreateSession={handleCreate}
+        onOpenAll={() => setOpenPanels([...openSessionNames])}
+        onCloseAll={() => setOpenPanels([])}
+        onBroadcast={handleBroadcast}
+      />
 
-        {!sidebarOpen ? null : <>
-        <div className="flex gap-2 mb-3">
-          <button
-            onClick={refresh}
-            className="px-3 py-1.5 text-sm rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-900"
-          >
-            Refresh
-          </button>
-          <button
-            onClick={() => setShowForm((v) => !v)}
-            className="px-3 py-1.5 text-sm rounded bg-black text-white dark:bg-white dark:text-black hover:opacity-80"
-          >
-            {showForm ? "Cancel" : "+ New"}
-          </button>
-        </div>
-
-        {error && (
-          <div className="mb-3 p-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950 rounded">
-            {error}
-          </div>
-        )}
-
-        {showForm && (
-          <form onSubmit={handleCreate} className="mb-4 p-3 border border-zinc-200 dark:border-zinc-800 rounded space-y-2">
-            <input
-              required
-              placeholder="session name"
-              value={formName}
-              onChange={(e) => setFormName(e.target.value)}
-              className="w-full px-2 py-1 text-sm border border-zinc-300 dark:border-zinc-700 rounded bg-transparent"
-            />
-            <select
-              value={formHarness}
-              onChange={(e) => setFormHarness(e.target.value)}
-              className="w-full px-2 py-1 text-sm border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100"
-            >
-              {DEFAULT_HARNESSES.map((h) => (
-                <option key={h} value={h}>{h}</option>
-              ))}
-            </select>
-            <input
-              required
-              placeholder="working_dir (absolute path)"
-              value={formCwd}
-              onChange={(e) => setFormCwd(e.target.value)}
-              className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-transparent"
-            />
-            {modelData && Object.keys(modelData.groups).length > 0 ? (
-              <select
-                value={formLLM}
-                onChange={(e) => setFormLLM(e.target.value)}
-                disabled={loadingModels}
-                className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 disabled:opacity-50"
-              >
-                <option value="">{loadingModels ? "Loading..." : "— Select model —"}</option>
-                {Object.entries(modelData.groups).map(([group, models]) =>
-                  Object.keys(modelData.groups).length > 1 ? (
-                    <optgroup key={group} label={group}>
-                      {models.map((m) => (
-                        <option key={m} value={m}>{m}</option>
-                      ))}
-                    </optgroup>
-                  ) : (
-                    models.map((m) => (
-                      <option key={m} value={m}>{m}</option>
-                    ))
-                  )
-                )}
-              </select>
-            ) : (
-              <input
-                placeholder="LLM (optional)"
-                value={formLLM}
-                onChange={(e) => setFormLLM(e.target.value)}
-                className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100"
-              />
-            )}
-            <button
-              type="submit"
-              disabled={creating}
-              className="w-full px-3 py-1.5 text-sm rounded bg-black text-white dark:bg-white dark:text-black hover:opacity-80 disabled:opacity-50"
-            >
-              {creating ? "Creating..." : "Create session"}
-            </button>
-          </form>
-        )}
-
-        {loading ? (
-          <p className="text-sm text-zinc-500">Loading...</p>
-        ) : openSessionNames.length === 0 ? (
-          <p className="text-sm text-zinc-500">No open sessions. Click + New.</p>
-        ) : (
-          <ul className="space-y-1">
-            {openSessionNames.map((name) => {
-              const meta = sessions.acpx.find((s) => normalizeSessionName(s.name) === name);
-              const isPanelOpen = openPanels.includes(name);
-              const status: SessionStatus = statusMap[name]?.activity || "idle";
-              const health: SessionHealth = statusMap[name]?.health || "connected";
-              const statusCfg = STATUS_CONFIG[status];
-              const healthCfg = HEALTH_CONFIG[health];
-              const dotColor = health !== "connected" ? healthCfg.color : statusCfg.color;
-              const dotPulse = health !== "connected" ? healthCfg.pulse : statusCfg.pulse;
-              return (
-                <li
-                  key={name}
-                  className={`p-2 rounded text-sm cursor-pointer flex items-start justify-between gap-2 ${
-                    isPanelOpen
-                      ? "bg-black text-white dark:bg-white dark:text-black"
-                      : "hover:bg-zinc-100 dark:hover:bg-zinc-900"
-                  }`}
-                  onClick={() => togglePanel(name)}
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium truncate flex items-center gap-1.5">
-                      <span
-                        className={`inline-block w-2 h-2 rounded-full shrink-0 ${dotColor} ${dotPulse ? "animate-pulse" : ""}`}
-                        title={health !== "connected" ? healthCfg.label : statusCfg.label}
-                      />
-                      {name}
-                      {health === "disconnected" && (
-                        <span className="text-xs font-normal text-red-500 ml-1">Disconnected</span>
-                      )}
-                      {health === "reconnecting" && (
-                        <span className="text-xs font-normal text-amber-500 ml-1">Reconnecting...</span>
-                      )}
-                      {health === "connected" && status !== "idle" && (
-                        <span className="text-xs font-normal opacity-50 ml-1">{statusCfg.label}</span>
-                      )}
-                    </div>
-                    {meta?.cwd && (
-                      <div className="text-xs opacity-70 truncate font-mono ml-3.5">{meta.cwd}</div>
-                    )}
-                  </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDelete(name);
-                    }}
-                    className="text-xs opacity-50 hover:opacity-100 px-1"
-                    title="Close session"
-                  >
-                    ✕
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-
-        {/* Open all / Close all */}
-        {openSessionNames.length > 1 && (
-          <div className="flex gap-2 mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
-            <button
-              onClick={() => setOpenPanels([...openSessionNames])}
-              className="flex-1 px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-900"
-            >
-              Open all
-            </button>
-            <button
-              onClick={() => setOpenPanels([])}
-              className="flex-1 px-2 py-1 text-xs rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-900"
-            >
-              Close all
-            </button>
-          </div>
-        )}
-
-        {/* Broadcast prompt */}
-        {activePanels.length > 1 && (
-          <form
-            onSubmit={(e) => { e.preventDefault(); handleBroadcast(); }}
-            className="mt-auto pt-3 border-t border-zinc-200 dark:border-zinc-800 space-y-2"
-          >
-            <label className="text-xs font-medium opacity-70">
-              Broadcast to {activePanels.length} panels
-            </label>
-            <textarea
-              rows={2}
-              placeholder="Send same prompt to all open panels..."
-              value={broadcastText}
-              onChange={(e) => setBroadcastText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                  e.preventDefault();
-                  handleBroadcast();
-                }
-              }}
-              className="w-full px-2 py-1.5 text-sm border border-zinc-300 dark:border-zinc-700 rounded bg-transparent resize-none"
-            />
-            <button
-              type="submit"
-              disabled={broadcasting || !broadcastText.trim()}
-              className="w-full px-3 py-1.5 text-sm rounded bg-black text-white dark:bg-white dark:text-black hover:opacity-80 disabled:opacity-50"
-            >
-              {broadcasting ? "Sending..." : "Broadcast (Ctrl+Enter)"}
-            </button>
-            {broadcastError && (
-              <div className="p-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950 rounded">
-                {broadcastError}
-              </div>
-            )}
-          </form>
-        )}
-        </>}
-      </aside>
-
-      {/* ---- Multi-panel chat area ---- */}
       <main className="flex flex-col min-h-0 min-w-0 flex-1 overflow-hidden">
         {activePanels.length > 0 ? (
           <div
