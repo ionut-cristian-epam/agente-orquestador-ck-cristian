@@ -123,33 +123,44 @@ Framework React para aplicaciones web. Usado aquí como base del frontend (v16).
         │                                     │
  ┌──────┴───────┐                      ┌──────┴───────┐
  │ localStorage │                      │  sessions/   │
- │ chat_messages│                      │  index.json  │
- │ :{nombre}    │                      │  (metadata)  │
- └──────────────┘                      └──────────────┘
+ │ openPanels,  │                      │  index.json  │
+ │ threadIds    │                      │  (metadata)  │
+ └──────────────┘                      │              │
+                                       │  sessions/   │
+                                       │  history/    │
+                                       │  {nombre}    │
+                                       │  .json       │
+                                       │  (mensajes   │
+                                       │  con formato)│
+                                       └──────────────┘
 ```
 
 ### Paso a paso
 
-1. **Usuario escribe mensaje** — CopilotChat llama `agent.addMessage({ role: "user", content: texto })`, guarda en `agent.messages[]` (memoria JS) y en `localStorage`, luego ejecuta `POST /agent/{nombre}` al backend
+1. **Usuario escribe mensaje** — CopilotChat llama `agent.addMessage({ role: "user", content: texto })`, guarda en `agent.messages[]` (memoria JS), luego ejecuta `POST /agent/{nombre}` al backend
 2. **Backend recibe prompt** — `agui_server.py` extrae el último texto del usuario y llama `session.stream_prompt(prompt)`
 3. **Backend envía a acpx** — `launch_sessions.py` ejecuta `acpx --format json {harness} -s {nombre} -f -` y envía el prompt por stdin
 4. **acpx comunica con el agente** — Reenvía el prompt al agente de codificación (OpenCode, Claude, etc.) via protocolo ACP. **acpx automáticamente escribe cada evento en `~/.acpx/sessions/{id}.stream.ndjson`**
 5. **Backend traduce ACP → AG-UI** — `acp_to_agui.py` convierte cada evento: `agent_message_chunk` → `TextMessageChunkEvent`, `agent_thought_chunk` → `ReasoningMessageChunkEvent`, `tool_call` → `ToolCallChunkEvent`, `tool_call_update` → `ToolCallResultEvent`
 6. **Backend envía SSE** — `agui_server.py` gestiona ciclo de vida de eventos (start/content/end) y envía como `StreamingResponse` SSE
-7. **CopilotKit renderiza** — Recibe eventos SSE, actualiza `agent.messages[]` y renderiza texto, pensamiento y tool calls en el panel de chat
+7. **CopilotKit renderiza** — Recibe eventos SSE, actualiza `agent.messages[]` y renderiza texto (via ReactMarkdown con remarkGfm), pensamiento y tool calls en el panel de chat
+8. **Backend guarda historial** — Al finalizar el stream, `agui_server.py` acumula todo el texto y thinking recibido durante el streaming y lo guarda en `sessions/history/{nombre}.json` con el formato markdown preservado (saltos de línea, listas, etc.)
 
 ### Dónde se almacena cada dato
 
 | Dato | Ubicación | Tipo | Persiste tras cerrar navegador | Persiste tras reiniciar backend |
 |------|-----------|------|-------------------------------|--------------------------------|
 | Mensajes del chat (visual) | `agent.messages[]` | Memoria JS | No | No |
-| Cache de mensajes | `localStorage` clave `chat_messages:{nombre}` | Navegador | Sí | Sí |
+| Paneles abiertos y thread IDs | `localStorage` | Navegador | Sí | Sí |
+| **Historial con formato** | **`sessions/history/{nombre}.json`** | **Archivo** | **Sí** | **Sí** |
 | Stream ACP completo | `~/.acpx/sessions/{id}.stream.ndjson` | Archivo | Sí | Sí |
 | Metadata de sesión (acpx) | `~/.acpx/sessions/{id}.json` | Archivo | Sí | Sí |
 | Índice de sesiones (local) | `sessions/index.json` | Archivo | Sí | Sí |
 | Índice de sesiones (acpx) | `~/.acpx/sessions/index.json` | Archivo | Sí | Sí |
 
-> **Nota:** El historial completo de conversación siempre queda registrado en `~/.acpx/sessions/{id}.stream.ndjson` (gestionado por acpx automáticamente). Sin embargo, la restauración visual de mensajes al recargar el navegador no está disponible actualmente por limitaciones internas de CopilotKit v2. El agente sí mantiene el contexto completo de la conversación aunque no se muestre en pantalla.
+> **Nota sobre historial y formato:** acpx guarda el contenido de los mensajes en `~/.acpx/sessions/`, pero **pierde los saltos de línea** al almacenar el texto final (ej. listas numeradas se concatenan sin `\n`). Por eso, el backend mantiene su propio historial en `sessions/history/` acumulando los chunks de texto durante el streaming, preservando así el formato markdown original (listas, párrafos, etc.). Al recargar la página, el endpoint `GET /sessions/{nombre}/history` consulta primero nuestro historial propio; solo si no existe, recurre al de acpx como fallback.
+
+> **Nota sobre codificación UTF-8:** En Windows, `subprocess.Popen` con `text=True` usa cp1252 por defecto, lo que causaba corrupción de caracteres especiales (ñ, á, é, í → mojibake). Se forzó `encoding="utf-8"` en todas las llamadas a subprocesos, I/O de archivos y respuestas HTTP (`UnicodeJSONResponse` con `ensure_ascii=False`).
 
 ---
 
@@ -219,14 +230,17 @@ agent-harness-orchestrator/
 │       ├── test_acp_to_agui.py
 │       ├── test_agui_server.py
 │       ├── test_session.py
-│       └── test_remove_session.py
+│       ├── test_remove_session.py
+│       └── test_utf8_encoding.py
 ├── frontend/
 │   ├── app/
 │   │   ├── page.tsx            # UI principal: sidebar + paneles de chat multi-sesión
 │   │   ├── layout.tsx          # Layout raíz Next.js
 │   │   └── globals.css         # Estilos globales (Tailwind)
 │   └── package.json
-├── sessions/                   # Índice local de sesiones (gitignored)
+├── sessions/                   # Índice local de sesiones
+│   ├── index.json              # Metadata de sesiones (nombre, harness, modelo, fechas)
+│   └── history/                # Historial propio de conversaciones (preserva formato markdown)
 ├── opencode.json               # Configuración de modelos y providers para OpenCode
 ├── run.py                      # Launcher del backend desde la raíz del proyecto
 ├── dev.ps1                     # Script para lanzar backend + frontend + abrir navegador
@@ -245,7 +259,7 @@ agent-harness-orchestrator/
 - **Interfaz multi-panel** — Abrir múltiples chats lado a lado en el navegador
 - **Broadcast** — Enviar el mismo prompt a todas las sesiones abiertas simultáneamente
 - **Estado en tiempo real** — Indicadores visuales por sesión: idle, thinking, tool_use, responding
-- **Persistencia de mensajes** — Historial de chat guardado en localStorage por sesión
+- **Persistencia de mensajes** — Historial de chat guardado en `sessions/history/` con formato markdown preservado. Se restaura al recargar la página
 - **Sidebar colapsable** — Más espacio para los paneles cuando se necesita
 - **Almacenamiento local de sesiones** — Índice propio en `sessions/index.json`, con fallback a `~/.acpx/sessions/`
 
@@ -330,6 +344,7 @@ session.close_session()
 | `GET` | `/sessions` | Listar sesiones (locales + acpx) |
 | `POST` | `/sessions` | Crear nueva sesión |
 | `DELETE` | `/sessions/{nombre}` | Cerrar y eliminar sesión |
+| `GET` | `/sessions/{nombre}/history` | Historial de conversación (con formato preservado) |
 | `GET` | `/sessions/status` | Estado de actividad de cada sesión |
 | `GET` | `/models/{harness}` | Modelos disponibles para un harness |
 | `POST` | `/agent/{nombre}` | Endpoint AG-UI — streaming SSE de conversación |
@@ -392,7 +407,7 @@ cd backend
 python -m pytest tests/ -v
 ```
 
-65 tests cubriendo: traducción ACP→AG-UI, endpoints del servidor, validación de modelos, gestión de sesiones y limpieza.
+70 tests cubriendo: traducción ACP→AG-UI, endpoints del servidor, validación de modelos, gestión de sesiones, limpieza y codificación UTF-8.
 
 ---
 
