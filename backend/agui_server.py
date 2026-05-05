@@ -435,8 +435,8 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                     # --- Tool call lifecycle ---
                     if isinstance(ev, ToolCallChunkEvent):
                         _session_status[name] = "tool_use"
-                        tc_id = ev.toolCallId or str(uuid.uuid4())
-                        tc_name = ev.toolCallName or "tool"
+                        tc_id = ev.tool_call_id or str(uuid.uuid4())
+                        tc_name = ev.tool_call_name or "tool"
                         if tc_id not in open_tool_calls:
                             if reasoning_started:
                                 yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
@@ -453,7 +453,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
 
                     if isinstance(ev, ToolCallResultEvent):
                         yield encoder.encode(ev)
-                        tc_id = ev.toolCallId
+                        tc_id = ev.tool_call_id
                         if tc_id and tc_id in open_tool_calls:
                             yield encoder.encode(ToolCallEndEvent(toolCallId=tc_id))
                             del open_tool_calls[tc_id]
@@ -469,7 +469,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                             yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
                             reasoning_started = False
                             reasoning_id = str(uuid.uuid4())
-                        ev.messageId = msg_id
+                        ev.message_id = msg_id
                         yield encoder.encode(ev)
                         continue
 
