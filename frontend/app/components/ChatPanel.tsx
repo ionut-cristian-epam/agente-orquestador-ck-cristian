@@ -13,6 +13,7 @@ import { HttpAgent } from "@ag-ui/client";
 import {
   type SessionStatus,
   type SessionHealth,
+  type SessionMetrics,
   type BroadcastSendFn,
   type HistoryEntry,
   STATUS_CONFIG,
@@ -109,6 +110,74 @@ function BroadcastReceiver({
   return null;
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${m}m${rem}s`;
+}
+
+function formatChars(n: number): string {
+  if (n < 1000) return `${n}`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+function MetricPill({ icon, label, value, detail }: { icon: string; label: string; value: string; detail?: string }) {
+  return (
+    <span
+      title={detail || `${label}: ${value}`}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800/80"
+    >
+      <span>{icon}</span>
+      <span className="text-zinc-400 dark:text-zinc-500">{label}</span>
+      <span className="text-zinc-700 dark:text-zinc-300 font-semibold">{value}</span>
+    </span>
+  );
+}
+
+function MetricsBar({ metrics }: { metrics: SessionMetrics | undefined }) {
+  if (!metrics || metrics.turns === 0) return null;
+
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 text-[11px] text-zinc-500 dark:text-zinc-400 font-mono shrink-0 overflow-x-auto">
+      <MetricPill
+        icon="💬"
+        label="Turnos"
+        value={String(metrics.turns)}
+      />
+      <MetricPill
+        icon="🔧"
+        label="Herram."
+        value={String(metrics.total_tool_calls)}
+        detail={`Llamadas a herramientas: ${metrics.total_tool_calls} (último turno: ${metrics.last_tool_calls})`}
+      />
+      <MetricPill
+        icon="⏱"
+        label="Prom."
+        value={formatDuration(metrics.avg_response_time_ms)}
+        detail={`Tiempo promedio: ${formatDuration(metrics.avg_response_time_ms)} · Último: ${formatDuration(metrics.last_response_time_ms)} · Total: ${formatDuration(metrics.total_response_time_ms)}`}
+      />
+      <MetricPill
+        icon="📝"
+        label="Salida"
+        value={formatChars(metrics.total_text_chars)}
+        detail={`Texto generado: ${metrics.total_text_chars.toLocaleString()} chars (último turno: ${metrics.last_text_chars.toLocaleString()})`}
+      />
+      {metrics.total_thinking_chars > 0 && (
+        <MetricPill
+          icon="🧠"
+          label="Pensam."
+          value={formatChars(metrics.total_thinking_chars)}
+          detail={`Pensamiento total: ${metrics.total_thinking_chars.toLocaleString()} chars (último turno: ${metrics.last_thinking_chars.toLocaleString()})`}
+        />
+      )}
+    </div>
+  );
+}
+
 function ClearChatButton({ sessionName }: { sessionName: string }) {
   const chatCfg = useCopilotChatConfiguration();
   const { agent } = useAgent({
@@ -138,6 +207,7 @@ export function ChatPanel({
   agent,
   status,
   health,
+  metrics,
   onClose,
   onBroadcastReady,
   onReconnect,
@@ -146,6 +216,7 @@ export function ChatPanel({
   agent: HttpAgent;
   status: SessionStatus;
   health: SessionHealth;
+  metrics?: SessionMetrics;
   onClose: () => void;
   onBroadcastReady?: (send: BroadcastSendFn) => void;
   onReconnect: () => void;
@@ -204,6 +275,7 @@ export function ChatPanel({
               </button>
             </span>
           </div>
+          <MetricsBar metrics={metrics} />
           <div className="flex-1 min-h-0 overflow-y-auto">
             <CopilotChat
               agentId={name}

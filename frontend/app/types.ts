@@ -64,6 +64,19 @@ export type HistoryEntry = {
 
 export type StatusEntry = { activity: SessionStatus; health: SessionHealth };
 
+export type SessionMetrics = {
+  turns: number;
+  total_text_chars: number;
+  total_thinking_chars: number;
+  total_tool_calls: number;
+  total_response_time_ms: number;
+  last_response_time_ms: number;
+  avg_response_time_ms: number;
+  last_tool_calls: number;
+  last_text_chars: number;
+  last_thinking_chars: number;
+};
+
 export type BroadcastSendFn = (text: string) => Promise<void>;
 
 export function getOrCreateThreadId(sessionName: string): string {

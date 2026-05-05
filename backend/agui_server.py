@@ -84,6 +84,48 @@ _session_status: dict[str, str] = {}
 # Per-session connection health: "connected" | "disconnected" | "reconnecting"
 _session_health: dict[str, str] = {}
 
+# Per-session metrics
+_session_metrics: dict[str, dict] = {}
+
+
+def _init_metrics(name: str) -> None:
+    """Initialise metrics dict for a session if it doesn't exist."""
+    if name not in _session_metrics:
+        _session_metrics[name] = {
+            "turns": 0,
+            "total_text_chars": 0,
+            "total_thinking_chars": 0,
+            "total_tool_calls": 0,
+            "total_response_time_ms": 0,
+            "last_response_time_ms": 0,
+            "avg_response_time_ms": 0,
+            "last_tool_calls": 0,
+            "last_text_chars": 0,
+            "last_thinking_chars": 0,
+        }
+
+
+def _update_metrics_after_turn(
+    name: str,
+    *,
+    response_time_ms: int,
+    text_chars: int,
+    thinking_chars: int,
+    tool_calls: int,
+) -> None:
+    _init_metrics(name)
+    m = _session_metrics[name]
+    m["turns"] += 1
+    m["total_text_chars"] += text_chars
+    m["total_thinking_chars"] += thinking_chars
+    m["total_tool_calls"] += tool_calls
+    m["total_response_time_ms"] += response_time_ms
+    m["last_response_time_ms"] = response_time_ms
+    m["avg_response_time_ms"] = round(m["total_response_time_ms"] / m["turns"])
+    m["last_tool_calls"] = tool_calls
+    m["last_text_chars"] = text_chars
+    m["last_thinking_chars"] = thinking_chars
+
 
 def _history_path(name: str) -> Path:
     """Return path to our own history file for a session."""
@@ -315,6 +357,16 @@ def session_status():
     }
 
 
+@app.get("/sessions/metrics")
+def all_session_metrics():
+    """Return metrics for all registered sessions."""
+    result = {}
+    for name in _sessions:
+        _init_metrics(name)
+        result[name] = _session_metrics[name]
+    return result
+
+
 @app.get("/sessions/{name}/history")
 def get_session_history(name: str, tail: Optional[int] = None):
     """Return conversation history, preferring our own saved copy (preserves formatting)."""
@@ -340,6 +392,7 @@ def delete_session(name: str):
     sess = _sessions.pop(name, None)
     _session_status.pop(name, None)
     _session_health.pop(name, None)
+    _session_metrics.pop(name, None)
     if sess is None:
         sess = _attach_existing(name)
     if sess is None:
@@ -423,6 +476,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
 
     async def event_gen():
         import uuid
+        import time as _time
         msg_id = str(uuid.uuid4())
         reasoning_id = str(uuid.uuid4())
         reasoning_started = False
@@ -432,6 +486,10 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
         # Accumulate streamed content to save history with proper formatting
         accumulated_text = []
         accumulated_thinking = []
+
+        # Metrics tracking for this turn
+        _turn_start = _time.monotonic()
+        _turn_tool_calls = 0
 
         _session_status[name] = "thinking"
         yield encoder.encode(RunStartedEvent(
@@ -465,6 +523,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                         tc_id = ev.tool_call_id or str(uuid.uuid4())
                         tc_name = ev.tool_call_name or "tool"
                         if tc_id not in open_tool_calls:
+                            _turn_tool_calls += 1
                             if reasoning_started:
                                 yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
                                 reasoning_started = False
@@ -512,6 +571,18 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
 
             _session_status[name] = "idle"
             _session_health[name] = "connected"
+
+            # Update per-session metrics
+            _turn_elapsed_ms = int((_time.monotonic() - _turn_start) * 1000)
+            _text_chars = sum(len(c) for c in accumulated_text)
+            _think_chars = sum(len(c) for c in accumulated_thinking)
+            _update_metrics_after_turn(
+                name,
+                response_time_ms=_turn_elapsed_ms,
+                text_chars=_text_chars,
+                thinking_chars=_think_chars,
+                tool_calls=_turn_tool_calls,
+            )
 
             # Save accumulated content to our own history (preserves formatting)
             normalized = _normalize_name(name)

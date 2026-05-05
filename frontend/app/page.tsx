@@ -5,6 +5,7 @@ import { HttpAgent } from "@ag-ui/client";
 import {
   type SessionsResponse,
   type StatusEntry,
+  type SessionMetrics,
   type BroadcastSendFn,
   BACKEND,
   STORAGE_KEY_PREFIX,
@@ -47,12 +48,17 @@ export default function Home() {
   }, []);
 
   const [statusMap, setStatusMap] = useState<Record<string, StatusEntry>>({});
+  const [metricsMap, setMetricsMap] = useState<Record<string, SessionMetrics>>({});
   const statusIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND}/sessions/status`);
-      if (res.ok) setStatusMap(await res.json());
+      const [statusRes, metricsRes] = await Promise.all([
+        fetch(`${BACKEND}/sessions/status`),
+        fetch(`${BACKEND}/sessions/metrics`),
+      ]);
+      if (statusRes.ok) setStatusMap(await statusRes.json());
+      if (metricsRes.ok) setMetricsMap(await metricsRes.json());
     } catch {}
   }, []);
 
@@ -242,6 +248,7 @@ export default function Home() {
                 agent={agentMap[name]}
                 status={statusMap[name]?.activity || "idle"}
                 health={statusMap[name]?.health || "connected"}
+                metrics={metricsMap[name]}
                 onClose={() => closePanel(name)}
                 onBroadcastReady={registerBroadcast(name)}
                 onReconnect={() => reconnectSession(name)}
