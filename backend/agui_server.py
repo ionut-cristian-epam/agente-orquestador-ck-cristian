@@ -52,8 +52,6 @@ from ag_ui.core import (
     ReasoningMessageStartEvent,
     ReasoningMessageEndEvent,
     ToolCallChunkEvent,
-    ToolCallStartEvent,
-    ToolCallEndEvent,
     ToolCallResultEvent,
 )
 from ag_ui.encoder import EventEncoder
@@ -569,6 +567,8 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                         continue
 
                     # --- Tool call lifecycle ---
+                    # CopilotKit's chunk transformer auto-wraps TOOL_CALL_CHUNK
+                    # with TOOL_CALL_START/ARGS/END — do NOT send explicit lifecycle events
                     if isinstance(ev, ToolCallChunkEvent):
                         _session_status[name] = "tool_use"
                         tc_id = ev.tool_call_id or str(uuid.uuid4())
@@ -576,20 +576,18 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                         # If this ID was already used (completed and closed), assign a new unique ID
                         if tc_id in seen_tool_call_ids and tc_id not in open_tool_calls:
                             tc_id = f"{tc_id}_{uuid.uuid4().hex[:8]}"
-                            ev.tool_call_id = tc_id
                         if tc_id not in open_tool_calls:
                             _turn_tool_calls += 1
                             if reasoning_started:
                                 yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
                                 reasoning_started = False
                                 reasoning_id = str(uuid.uuid4())
-                            yield encoder.encode(ToolCallStartEvent(
-                                toolCallId=tc_id,
-                                toolCallName=tc_name,
-                                parentMessageId=msg_id,
-                            ))
                             open_tool_calls[tc_id] = tc_name
                             seen_tool_call_ids.add(tc_id)
+                        # Ensure the chunk has toolCallId, toolCallName, and parentMessageId
+                        ev.tool_call_id = tc_id
+                        ev.tool_call_name = tc_name
+                        ev.parent_message_id = msg_id
                         yield encoder.encode(ev)
                         continue
 
@@ -597,7 +595,6 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                         yield encoder.encode(ev)
                         tc_id = ev.tool_call_id
                         if tc_id and tc_id in open_tool_calls:
-                            yield encoder.encode(ToolCallEndEvent(toolCallId=tc_id))
                             del open_tool_calls[tc_id]
                         continue
 
@@ -622,8 +619,6 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
             # Close any open lifecycle events
             if reasoning_started:
                 yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
-            for tc_id in list(open_tool_calls):
-                yield encoder.encode(ToolCallEndEvent(toolCallId=tc_id))
 
             _session_status[name] = "idle"
             _session_health[name] = "connected"
@@ -661,8 +656,6 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
             print(f"[run_agent] {type(e).__name__}: {e!r}\n{tb}", flush=True)
             if reasoning_started:
                 yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
-            for tc_id in list(open_tool_calls):
-                yield encoder.encode(ToolCallEndEvent(toolCallId=tc_id))
             _session_status[name] = "idle"
             _session_health[name] = "disconnected"
             yield encoder.encode(RunErrorEvent(message=f"{type(e).__name__}: {e}"))

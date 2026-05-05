@@ -89,7 +89,8 @@ def _event_types(events: list[dict]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 class TestToolCallLifecycle:
-    def test_tool_call_start_emitted_on_first_chunk(self):
+    def test_tool_call_chunk_emitted(self):
+        """TOOL_CALL_CHUNK is emitted (lifecycle managed by client chunk transformer)."""
         sess = _mock_session("sess")
 
         async def fake_stream(_prompt):
@@ -104,12 +105,12 @@ class TestToolCallLifecycle:
         events = _parse_sse_events(res.text)
         types = _event_types(events)
 
-        assert "TOOL_CALL_START" in types
         assert "TOOL_CALL_CHUNK" in types
-        # ToolCallEnd emitted at stream end for unclosed tool calls
-        assert "TOOL_CALL_END" in types
+        # No explicit START/END — chunk transformer on client handles lifecycle
+        assert "TOOL_CALL_START" not in types
+        assert "TOOL_CALL_END" not in types
 
-    def test_tool_call_end_after_result(self):
+    def test_tool_call_result_after_chunk(self):
         sess = _mock_session("sess")
 
         async def fake_stream(_prompt):
@@ -125,12 +126,10 @@ class TestToolCallLifecycle:
         events = _parse_sse_events(res.text)
         types = _event_types(events)
 
-        # Should have: START, CHUNK, RESULT, END
-        start_idx = types.index("TOOL_CALL_START")
+        # Should have CHUNK then RESULT
+        chunk_idx = types.index("TOOL_CALL_CHUNK")
         result_idx = types.index("TOOL_CALL_RESULT")
-        end_idx = types.index("TOOL_CALL_END")
-
-        assert start_idx < result_idx < end_idx
+        assert chunk_idx < result_idx
 
     def test_multiple_tool_calls_tracked_independently(self):
         sess = _mock_session("sess")
@@ -149,18 +148,18 @@ class TestToolCallLifecycle:
 
         events = _parse_sse_events(res.text)
 
-        # Two START events
-        starts = [e for e in events if e.get("type") == "TOOL_CALL_START"]
-        assert len(starts) == 2
-        start_ids = {e.get("toolCallId") for e in starts}
-        assert start_ids == {"tc_A", "tc_B"}
+        # Two CHUNK events with different IDs
+        chunks = [e for e in events if e.get("type") == "TOOL_CALL_CHUNK"]
+        assert len(chunks) == 2
+        chunk_ids = {e.get("toolCallId") for e in chunks}
+        assert chunk_ids == {"tc_A", "tc_B"}
 
-        # Two END events
-        ends = [e for e in events if e.get("type") == "TOOL_CALL_END"]
-        assert len(ends) == 2
+        # Two RESULT events
+        results = [e for e in events if e.get("type") == "TOOL_CALL_RESULT"]
+        assert len(results) == 2
 
-    def test_no_duplicate_start_for_same_tool_call(self):
-        """If same toolCallId appears twice, only one START emitted."""
+    def test_no_duplicate_chunk_for_same_tool_call(self):
+        """If same toolCallId appears twice, both chunks are emitted (args accumulate)."""
         sess = _mock_session("sess")
 
         async def fake_stream(_prompt):
@@ -175,11 +174,12 @@ class TestToolCallLifecycle:
             res = client.post("/agent/sess", json=RUN_INPUT, headers={"accept": "text/event-stream"})
 
         events = _parse_sse_events(res.text)
-        starts = [e for e in events if e.get("type") == "TOOL_CALL_START"]
-        assert len(starts) == 1
+        chunks = [e for e in events if e.get("type") == "TOOL_CALL_CHUNK"]
+        # Both chunks emitted
+        assert len(chunks) == 2
 
-    def test_open_tool_calls_closed_on_error(self):
-        """If stream errors, open tool calls still get END events."""
+    def test_error_emits_run_error(self):
+        """If stream errors, RUN_ERROR is emitted."""
         sess = _mock_session("sess")
 
         async def fake_stream(_prompt):
@@ -196,8 +196,8 @@ class TestToolCallLifecycle:
         events = _parse_sse_events(res.text)
         types = _event_types(events)
 
-        assert "TOOL_CALL_START" in types
-        assert "TOOL_CALL_END" in types
+        assert "TOOL_CALL_CHUNK" in types
+        assert "RUN_ERROR" in types
         assert "RUN_ERROR" in types
 
     def test_reasoning_closed_before_tool_call(self):
@@ -217,10 +217,10 @@ class TestToolCallLifecycle:
         events = _parse_sse_events(res.text)
         types = _event_types(events)
 
-        # Reasoning END should come before TOOL_CALL_START
+        # Reasoning END should come before TOOL_CALL_CHUNK
         reasoning_end_idx = types.index("REASONING_MESSAGE_END")
-        tool_start_idx = types.index("TOOL_CALL_START")
-        assert reasoning_end_idx < tool_start_idx
+        tool_chunk_idx = types.index("TOOL_CALL_CHUNK")
+        assert reasoning_end_idx < tool_chunk_idx
 
     def test_status_changes_to_tool_use_during_tool_call(self):
         sess = _mock_session("sess")
