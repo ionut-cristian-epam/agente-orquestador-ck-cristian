@@ -19,12 +19,19 @@ function normalizeSessionName(name: string): string {
 }
 
 type SessionStatus = "idle" | "thinking" | "tool_use" | "responding";
+type SessionHealth = "connected" | "disconnected" | "reconnecting";
 
 const STATUS_CONFIG: Record<SessionStatus, { label: string; color: string; pulse: boolean }> = {
   idle:       { label: "Idle",       color: "bg-zinc-400", pulse: false },
   thinking:   { label: "Thinking",   color: "bg-yellow-400", pulse: true },
   tool_use:   { label: "Tool use",   color: "bg-blue-400", pulse: true },
   responding: { label: "Responding", color: "bg-green-400", pulse: true },
+};
+
+const HEALTH_CONFIG: Record<SessionHealth, { label: string; color: string; pulse: boolean }> = {
+  connected:    { label: "",              color: "",             pulse: false },
+  disconnected: { label: "Disconnected",  color: "bg-red-500",  pulse: false },
+  reconnecting: { label: "Reconnecting",  color: "bg-amber-400", pulse: true },
 };
 
 type AcpxSession = {
@@ -204,18 +211,26 @@ function ChatPanel({
   name,
   agent,
   status,
+  health,
   onClose,
   onBroadcastReady,
+  onReconnect,
 }: {
   name: string;
   agent: HttpAgent;
   status: SessionStatus;
+  health: SessionHealth;
   onClose: () => void;
   onBroadcastReady?: (send: BroadcastSendFn) => void;
+  onReconnect: () => void;
 }) {
   const agents = useMemo(() => ({ [name]: agent }), [name, agent]);
   const cfg = STATUS_CONFIG[status];
+  const healthCfg = HEALTH_CONFIG[health];
   const threadId = useMemo(() => getOrCreateThreadId(name), [name]);
+
+  const dotColor = health !== "connected" ? healthCfg.color : cfg.color;
+  const dotPulse = health !== "connected" ? healthCfg.pulse : cfg.pulse;
 
   return (
     <CopilotKitProvider key={name} agents__unsafe_dev_only={agents}>
@@ -228,11 +243,27 @@ function ChatPanel({
           <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 shrink-0">
             <span className="font-mono text-sm font-medium truncate flex items-center gap-1.5">
               <span
-                className={`inline-block w-2 h-2 rounded-full shrink-0 ${cfg.color} ${cfg.pulse ? "animate-pulse" : ""}`}
-                title={cfg.label}
+                className={`inline-block w-2 h-2 rounded-full shrink-0 ${dotColor} ${dotPulse ? "animate-pulse" : ""}`}
+                title={health !== "connected" ? healthCfg.label : cfg.label}
               />
               {name}
-              {status !== "idle" && (
+              {health === "disconnected" && (
+                <span className="text-xs font-normal text-red-500 ml-1 flex items-center gap-1">
+                  Disconnected
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onReconnect(); }}
+                    className="underline hover:no-underline"
+                  >
+                    Retry
+                  </button>
+                </span>
+              )}
+              {health === "reconnecting" && (
+                <span className="text-xs font-normal text-amber-500 ml-1">
+                  Reconnecting...
+                </span>
+              )}
+              {health === "connected" && status !== "idle" && (
                 <span className="text-xs font-normal opacity-60 ml-1">{cfg.label}</span>
               )}
             </span>
@@ -323,8 +354,9 @@ export default function Home() {
   }, []);
 
 
-  // Session status polling
-  const [statusMap, setStatusMap] = useState<Record<string, SessionStatus>>({});
+  // Session status polling (activity + health)
+  type StatusEntry = { activity: SessionStatus; health: SessionHealth };
+  const [statusMap, setStatusMap] = useState<Record<string, StatusEntry>>({});
   const statusIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -341,6 +373,31 @@ export default function Home() {
       if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
     };
   }, [fetchStatus]);
+
+  // Reconnect a disconnected session
+  const reconnectSession = useCallback(async (name: string) => {
+    try {
+      await fetch(`${BACKEND}/sessions/${encodeURIComponent(name)}/reconnect`, {
+        method: "POST",
+      });
+    } catch {}
+    fetchStatus();
+  }, [fetchStatus]);
+
+  // Auto-reconnect with 10s cooldown per session
+  const reconnectCooldowns = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    const now = Date.now();
+    for (const [name, entry] of Object.entries(statusMap)) {
+      if (entry.health === "disconnected") {
+        const lastAttempt = reconnectCooldowns.current.get(name) || 0;
+        if (now - lastAttempt > 10_000) {
+          reconnectCooldowns.current.set(name, now);
+          reconnectSession(name);
+        }
+      }
+    }
+  }, [statusMap, reconnectSession]);
 
   const refresh = useCallback(async () => {
     try {
@@ -598,8 +655,12 @@ export default function Home() {
             {openSessionNames.map((name) => {
               const meta = sessions.acpx.find((s) => normalizeSessionName(s.name) === name);
               const isPanelOpen = openPanels.includes(name);
-              const status: SessionStatus = statusMap[name] || "idle";
+              const status: SessionStatus = statusMap[name]?.activity || "idle";
+              const health: SessionHealth = statusMap[name]?.health || "connected";
               const statusCfg = STATUS_CONFIG[status];
+              const healthCfg = HEALTH_CONFIG[health];
+              const dotColor = health !== "connected" ? healthCfg.color : statusCfg.color;
+              const dotPulse = health !== "connected" ? healthCfg.pulse : statusCfg.pulse;
               return (
                 <li
                   key={name}
@@ -613,11 +674,17 @@ export default function Home() {
                   <div className="min-w-0 flex-1">
                     <div className="font-medium truncate flex items-center gap-1.5">
                       <span
-                        className={`inline-block w-2 h-2 rounded-full shrink-0 ${statusCfg.color} ${statusCfg.pulse ? "animate-pulse" : ""}`}
-                        title={statusCfg.label}
+                        className={`inline-block w-2 h-2 rounded-full shrink-0 ${dotColor} ${dotPulse ? "animate-pulse" : ""}`}
+                        title={health !== "connected" ? healthCfg.label : statusCfg.label}
                       />
                       {name}
-                      {status !== "idle" && (
+                      {health === "disconnected" && (
+                        <span className="text-xs font-normal text-red-500 ml-1">Disconnected</span>
+                      )}
+                      {health === "reconnecting" && (
+                        <span className="text-xs font-normal text-amber-500 ml-1">Reconnecting...</span>
+                      )}
+                      {health === "connected" && status !== "idle" && (
                         <span className="text-xs font-normal opacity-50 ml-1">{statusCfg.label}</span>
                       )}
                     </div>
@@ -712,9 +779,11 @@ export default function Home() {
                 key={name}
                 name={name}
                 agent={agentMap[name]}
-                status={statusMap[name] || "idle"}
+                status={statusMap[name]?.activity || "idle"}
+                health={statusMap[name]?.health || "connected"}
                 onClose={() => closePanel(name)}
                 onBroadcastReady={registerBroadcast(name)}
+                onReconnect={() => reconnectSession(name)}
               />
             ))}
           </div>

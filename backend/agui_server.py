@@ -81,6 +81,9 @@ _sessions: dict[str, Session] = {}
 # Per-session activity status: "idle" | "thinking" | "tool_use" | "responding"
 _session_status: dict[str, str] = {}
 
+# Per-session connection health: "connected" | "disconnected" | "reconnecting"
+_session_health: dict[str, str] = {}
+
 
 def _history_path(name: str) -> Path:
     """Return path to our own history file for a session."""
@@ -219,6 +222,7 @@ def _get_or_attach(name: str) -> Session:
             ),
         )
     _sessions[name] = sess
+    _session_health[name] = "connected"
     return sess
 
 
@@ -286,6 +290,7 @@ def create_session(req: CreateSessionRequest):
         kwargs["LLM"] = req.LLM
     sess = Session(**kwargs)
     _sessions[normalized_name] = sess
+    _session_health[normalized_name] = "connected"
     _add_to_local_index({
         "name": normalized_name,
         "agent_harness": req.agent_harness,
@@ -300,8 +305,14 @@ def create_session(req: CreateSessionRequest):
 
 @app.get("/sessions/status")
 def session_status():
-    """Return the current activity status of every registered session."""
-    return {name: _session_status.get(name, "idle") for name in _sessions}
+    """Return activity status and connection health of every registered session."""
+    return {
+        name: {
+            "activity": _session_status.get(name, "idle"),
+            "health": _session_health.get(name, "connected"),
+        }
+        for name in _sessions
+    }
 
 
 @app.get("/sessions/{name}/history")
@@ -328,6 +339,7 @@ def delete_session(name: str):
     name = _normalize_name(name)
     sess = _sessions.pop(name, None)
     _session_status.pop(name, None)
+    _session_health.pop(name, None)
     if sess is None:
         sess = _attach_existing(name)
     if sess is None:
@@ -343,6 +355,21 @@ def delete_session(name: str):
         hp.unlink()
     _remove_from_local_index(name)
     return {"status": "deleted"}
+
+
+@app.post("/sessions/{name}/reconnect")
+def reconnect_session(name: str):
+    """Attempt to reconnect a disconnected session's acpx process."""
+    name = _normalize_name(name)
+    sess = _get_or_attach(name)
+    _session_health[name] = "reconnecting"
+    try:
+        sess._ensure_connected()
+        _session_health[name] = "connected"
+        return {"status": "reconnected"}
+    except Exception as e:
+        _session_health[name] = "disconnected"
+        raise HTTPException(500, f"Reconnect failed: {e}")
 
 
 _MODELS_BY_HARNESS: dict[str, dict[str, list[str]]] = {
@@ -484,6 +511,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                 yield encoder.encode(ToolCallEndEvent(toolCallId=tc_id))
 
             _session_status[name] = "idle"
+            _session_health[name] = "connected"
 
             # Save accumulated content to our own history (preserves formatting)
             normalized = _normalize_name(name)
@@ -509,6 +537,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
             for tc_id in list(open_tool_calls):
                 yield encoder.encode(ToolCallEndEvent(toolCallId=tc_id))
             _session_status[name] = "idle"
+            _session_health[name] = "disconnected"
             yield encoder.encode(RunErrorEvent(message=f"{type(e).__name__}: {e}"))
 
     return StreamingResponse(event_gen(), media_type=encoder.get_content_type())

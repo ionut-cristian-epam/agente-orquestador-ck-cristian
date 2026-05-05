@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from agui_server import app, _sessions, _session_status
+from agui_server import app, _sessions, _session_status, _session_health
 from launch_sessions import Session
 
 
@@ -28,9 +28,11 @@ from launch_sessions import Session
 def clear_sessions():
     _sessions.clear()
     _session_status.clear()
+    _session_health.clear()
     yield
     _sessions.clear()
     _session_status.clear()
+    _session_health.clear()
 
 
 def _mock_session(name: str = "test") -> Session:

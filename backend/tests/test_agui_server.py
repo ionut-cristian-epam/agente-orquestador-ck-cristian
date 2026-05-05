@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from httpx import AsyncClient, ASGITransport
 
 import agui_server
-from agui_server import app, _sessions, _session_status
+from agui_server import app, _sessions, _session_status, _session_health
 from launch_sessions import Session
 
 
@@ -25,9 +25,11 @@ def clear_sessions():
     """Reset server-side session registry between tests."""
     _sessions.clear()
     _session_status.clear()
+    _session_health.clear()
     yield
     _sessions.clear()
     _session_status.clear()
+    _session_health.clear()
 
 
 def _mock_session(name: str = "test", harness: str = "opencode") -> Session:
@@ -293,14 +295,14 @@ class TestSessionStatus:
         _sessions["s1"] = _mock_session("s1")
         with TestClient(app) as client:
             res = client.get("/sessions/status")
-        assert res.json() == {"s1": "idle"}
+        assert res.json() == {"s1": {"activity": "idle", "health": "connected"}}
 
     def test_returns_explicit_status(self):
         _sessions["s1"] = _mock_session("s1")
         _session_status["s1"] = "thinking"
         with TestClient(app) as client:
             res = client.get("/sessions/status")
-        assert res.json() == {"s1": "thinking"}
+        assert res.json() == {"s1": {"activity": "thinking", "health": "connected"}}
 
     def test_stream_sets_idle_on_finish(self):
         sess = _mock_session("sess")
@@ -329,6 +331,77 @@ class TestSessionStatus:
         with TestClient(app) as client:
             client.delete("/sessions/s1")
         assert "s1" not in _session_status
+        assert "s1" not in _session_health
+
+
+# ---------------------------------------------------------------------------
+# POST /sessions/{name}/reconnect
+# ---------------------------------------------------------------------------
+
+class TestReconnectSession:
+    def test_reconnect_success(self):
+        sess = _mock_session("s1")
+        sess._ensure_connected = MagicMock()
+        _sessions["s1"] = sess
+        _session_health["s1"] = "disconnected"
+
+        with TestClient(app) as client:
+            res = client.post("/sessions/s1/reconnect")
+
+        assert res.status_code == 200
+        assert res.json()["status"] == "reconnected"
+        assert _session_health["s1"] == "connected"
+        sess._ensure_connected.assert_called_once()
+
+    def test_reconnect_failure_stays_disconnected(self):
+        sess = _mock_session("s1")
+        sess._ensure_connected = MagicMock(side_effect=RuntimeError("acpx dead"))
+        _sessions["s1"] = sess
+        _session_health["s1"] = "disconnected"
+
+        with TestClient(app) as client:
+            res = client.post("/sessions/s1/reconnect")
+
+        assert res.status_code == 500
+        assert _session_health["s1"] == "disconnected"
+
+    def test_reconnect_unknown_session_404(self):
+        from unittest.mock import patch
+        with patch("agui_server._attach_existing", return_value=None):
+            with TestClient(app) as client:
+                res = client.post("/sessions/ghost/reconnect")
+        assert res.status_code == 404
+
+    def test_health_set_connected_after_successful_stream(self):
+        sess = _mock_session("sess")
+        _sessions["sess"] = sess
+        _session_health["sess"] = "disconnected"
+
+        async def fake_stream(_prompt):
+            yield ACP_MESSAGE
+
+        sess.stream_prompt = fake_stream
+
+        with TestClient(app) as client:
+            client.post("/agent/sess", json=RUN_INPUT, headers={"accept": "text/event-stream"})
+
+        assert _session_health["sess"] == "connected"
+
+    def test_health_set_disconnected_after_stream_error(self):
+        sess = _mock_session("sess")
+        _sessions["sess"] = sess
+        _session_health["sess"] = "connected"
+
+        async def fake_stream(_prompt):
+            raise RuntimeError("crash")
+            yield
+
+        sess.stream_prompt = fake_stream
+
+        with TestClient(app) as client:
+            client.post("/agent/sess", json=RUN_INPUT, headers={"accept": "text/event-stream"})
+
+        assert _session_health["sess"] == "disconnected"
 
 
 # ---------------------------------------------------------------------------

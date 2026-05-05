@@ -22,6 +22,7 @@ from agui_server import (
     app,
     _sessions,
     _session_status,
+    _session_health,
     _save_own_history,
     _load_own_history,
     _history_path,
@@ -37,9 +38,11 @@ from launch_sessions import Session
 def clear_sessions():
     _sessions.clear()
     _session_status.clear()
+    _session_health.clear()
     yield
     _sessions.clear()
     _session_status.clear()
+    _session_health.clear()
 
 
 @pytest.fixture
