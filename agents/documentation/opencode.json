@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "amazon-bedrock/moonshot.kimi-k2-thinking",
+  "model": "opencode/minimax-m2.5-free",
   "provider": {
     "nagaai": {
       "npm": "@ai-sdk/openai-compatible",
@@ -12,31 +12,52 @@
       "models": {
         "gemini-2.5-flash:free": {
           "name": "Gemini 2.5 Flash (Free)",
-          "limit": { "context": 1048576, "output": 65536 }
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          }
         },
         "llama-3.3-70b-instruct:free": {
           "name": "Llama 3.3 70B Instruct (Free)",
-          "limit": { "context": 128000, "output": 8192 }
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
         },
         "gpt-4.1-mini-2025-04-14:free": {
           "name": "GPT-4.1 Mini (Free)",
-          "limit": { "context": 1047576, "output": 65536 }
+          "limit": {
+            "context": 1047576,
+            "output": 65536
+          }
         },
         "llama-4-scout-17b-16e-instruct:free": {
           "name": "Llama 4 Scout 17B (Free)",
-          "limit": { "context": 327680, "output": 8192 }
+          "limit": {
+            "context": 327680,
+            "output": 8192
+          }
         },
         "nemotron-3-super-120b-a12b:free": {
           "name": "Nemotron 3 Super 120B (Free)",
-          "limit": { "context": 262144, "output": 65536 }
+          "limit": {
+            "context": 262144,
+            "output": 65536
+          }
         },
         "glm-4.5-air:free": {
           "name": "GLM 4.5 Air (Free)",
-          "limit": { "context": 131072, "output": 65536 }
+          "limit": {
+            "context": 131072,
+            "output": 65536
+          }
         },
         "sonar:free": {
           "name": "Sonar (Free)",
-          "limit": { "context": 127072, "output": 8192 }
+          "limit": {
+            "context": 127072,
+            "output": 8192
+          }
         }
       }
     }

@@ -298,7 +298,7 @@ if __name__ == "__main__":
     debugging_session = Session(
         agent_harness="opencode",
         name="agent_debugging",
-        working_dir=os.path.join(os.path.dirname(__file__), "agent_debugging"),
+        working_dir=os.path.join(os.path.dirname(__file__), "..", "agents", "debugging"),
         LLM="opencode/gpt-5-nano",
         capture_output=True,
     )

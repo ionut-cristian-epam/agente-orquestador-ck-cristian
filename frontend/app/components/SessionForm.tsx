@@ -8,6 +8,13 @@ import {
   normalizeSessionName,
 } from "../types";
 
+interface Workspace {
+  name: string;
+  path: string;
+  description: string;
+  skills: { name: string; description: string }[];
+}
+
 export function SessionForm({
   onSubmit,
   onCancel,
@@ -24,6 +31,19 @@ export function SessionForm({
   const [creating, setCreating] = useState(false);
   const [modelData, setModelData] = useState<ModelData | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+
+  useEffect(() => {
+    fetch(`${BACKEND}/workspaces`)
+      .then((r) => r.json())
+      .then((data: Workspace[]) => {
+        setWorkspaces(data);
+        if (data.length > 0 && !formCwd) {
+          setFormCwd(data[0].path);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,13 +102,34 @@ export function SessionForm({
           <option key={h} value={h}>{h}</option>
         ))}
       </select>
-      <input
-        required
-        placeholder="working_dir (absolute path)"
+      <select
         value={formCwd}
         onChange={(e) => setFormCwd(e.target.value)}
-        className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-transparent"
-      />
+        className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100"
+      >
+        {workspaces.map((ws) => (
+          <option key={ws.path} value={ws.path}>
+            {ws.name === "root" ? "📁 root (generic)" : `🤖 ${ws.name}`}
+          </option>
+        ))}
+      </select>
+      {(() => {
+        const selected = workspaces.find((ws) => ws.path === formCwd);
+        if (!selected || selected.skills.length === 0) return null;
+        return (
+          <div className="px-2 py-1.5 text-xs bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700 rounded">
+            <span className="font-medium opacity-70">Skills:</span>
+            {selected.skills.map((skill) => (
+              <div key={skill.name} className="mt-0.5 pl-2">
+                <span className="font-semibold">{skill.name}</span>
+                {skill.description && (
+                  <span className="opacity-60"> — {skill.description}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        );
+      })()}
       {modelData && Object.keys(modelData.groups).length > 0 ? (
         <select
           value={formLLM}

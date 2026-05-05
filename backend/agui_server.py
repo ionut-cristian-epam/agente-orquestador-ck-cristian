@@ -66,6 +66,7 @@ from remove_session import remove_session
 PROJECT_ROOT = Path(
     os.environ.get("AGENT_ORCH_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
+AGENTS_DIR = PROJECT_ROOT / "agents"
 SESSIONS_DIR = PROJECT_ROOT / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
 
@@ -315,6 +316,54 @@ def list_sessions():
     }
 
 
+import re as _re
+
+def _parse_skill_frontmatter(skill_path: Path) -> dict:
+    """Parse YAML frontmatter from a skill markdown file."""
+    text = skill_path.read_text(encoding="utf-8")
+    match = _re.match(r"^---\s*\n(.+?)\n---", text, _re.DOTALL)
+    if not match:
+        return {"name": skill_path.stem, "description": ""}
+    frontmatter = match.group(1)
+    result = {"name": skill_path.stem, "description": ""}
+    for line in frontmatter.splitlines():
+        if line.startswith("name:"):
+            result["name"] = line.split(":", 1)[1].strip().strip('"')
+        elif line.startswith("description:"):
+            result["description"] = line.split(":", 1)[1].strip().strip('"')
+    return result
+
+
+def _scan_skills(workspace_path: Path) -> list[dict]:
+    """Scan the skills/ directory of a workspace and return skill metadata."""
+    skills_dir = workspace_path / "skills"
+    if not skills_dir.is_dir():
+        return []
+    skills = []
+    for f in sorted(skills_dir.iterdir()):
+        if f.suffix == ".md" and f.is_file():
+            meta = _parse_skill_frontmatter(f)
+            skills.append(meta)
+    return skills
+
+
+@app.get("/workspaces")
+def list_workspaces():
+    """Auto-discover available agent workspaces (directories with opencode.json)."""
+    workspaces = [{"name": "root", "path": str(PROJECT_ROOT), "skills": [], "description": "Generic (no specialized skills)"}]
+    if AGENTS_DIR.is_dir():
+        for child in sorted(AGENTS_DIR.iterdir()):
+            if child.is_dir() and (child / "opencode.json").exists():
+                skills = _scan_skills(child)
+                workspaces.append({
+                    "name": child.name,
+                    "path": str(child),
+                    "skills": skills,
+                    "description": f"Agent: {child.name}",
+                })
+    return workspaces
+
+
 @app.post("/sessions")
 def create_session(req: CreateSessionRequest):
     normalized_name = _normalize_name(req.name)
@@ -482,6 +531,8 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
         reasoning_started = False
         # Track open tool calls: toolCallId -> toolCallName
         open_tool_calls: dict[str, str] = {}
+        # Track all tool call IDs ever used (to avoid re-emitting START for same ID)
+        seen_tool_call_ids: set[str] = set()
 
         # Accumulate streamed content to save history with proper formatting
         accumulated_text = []
@@ -522,6 +573,10 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                         _session_status[name] = "tool_use"
                         tc_id = ev.tool_call_id or str(uuid.uuid4())
                         tc_name = ev.tool_call_name or "tool"
+                        # If this ID was already used (completed and closed), assign a new unique ID
+                        if tc_id in seen_tool_call_ids and tc_id not in open_tool_calls:
+                            tc_id = f"{tc_id}_{uuid.uuid4().hex[:8]}"
+                            ev.tool_call_id = tc_id
                         if tc_id not in open_tool_calls:
                             _turn_tool_calls += 1
                             if reasoning_started:
@@ -534,6 +589,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                                 parentMessageId=msg_id,
                             ))
                             open_tool_calls[tc_id] = tc_name
+                            seen_tool_call_ids.add(tc_id)
                         yield encoder.encode(ev)
                         continue
 
