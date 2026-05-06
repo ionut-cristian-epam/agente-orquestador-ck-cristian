@@ -46,6 +46,18 @@ class Session:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
 
+        # Log loaded skills from instructions
+        instructions = config.get("instructions", [])
+        if instructions:
+            for instr in instructions:
+                instr_path = os.path.join(self.working_dir, instr)
+                if os.path.isfile(instr_path):
+                    print(f"[skill] ✓ Loaded skill instruction: {instr}")
+                else:
+                    print(f"[skill] ✗ Skill instruction NOT found: {instr} (resolved: {instr_path})")
+        else:
+            print(f"[skill] No skill instructions configured in {file}")
+
     def _run(self, cmd, capture_output=False):
         output_lines = []
         with subprocess.Popen(

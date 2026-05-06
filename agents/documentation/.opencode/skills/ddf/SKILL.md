@@ -1,10 +1,6 @@
 ---
 name: ddf
 description: "Genera Documentación de Diseño Funcional (DDF) completa o por secciones desde código fuente. Presenta siempre un selector interactivo para que el usuario elija exactamente qué secciones generar. Úsala cuando el usuario pida documentar, analizar o generar el DDF, la arquitectura, casos de uso, módulos, interfaces, flujos, o cualquier sección funcional del sistema."
-argument-hint: "[completo | nombre-de-sección]"
-allowed-tools: Glob, Grep, Read, Write, Bash, Task, AskUserQuestion
-model: sonnet
-effort: high
 ---
 
 # Generador DDF Unificado
