@@ -57,19 +57,23 @@ Framework React para aplicaciones web. Usado aquí como base del frontend (v16).
 ┌─────────────────────────────────────────────────────────────────┐
 │                    BACKEND (FastAPI + Python)                    │
 │                                                                 │
-│  POST /agent/{name}  ← Endpoint AG-UI (streaming SSE)           │
-│  GET  /sessions      ← Listar sesiones (local + acpx)           │
-│  POST /sessions      ← Crear nueva sesión                       │
-│  DELETE /sessions/{n} ← Cerrar sesión                           │
-│  GET /sessions/status ← Estado de actividad por sesión          │
-│  GET /models/{harness}← Modelos disponibles por harness         │
+│  POST /agent/{name}       ← Endpoint AG-UI (streaming SSE)     │
+│  GET  /sessions           ← Listar sesiones (local + acpx)     │
+│  POST /sessions           ← Crear nueva sesión                 │
+│  DELETE /sessions/{n}     ← Cerrar sesión                      │
+│  GET /sessions/status     ← Estado de actividad por sesión     │
+│  GET /sessions/metrics    ← Métricas por sesión                │
+│  GET /sessions/{n}/history← Historial de conversación          │
+│  POST /sessions/{n}/reconnect ← Reconectar sesión caída       │
+│  GET /workspaces          ← Workspaces de agentes con skills   │
+│  GET /models/{harness}    ← Modelos disponibles por harness    │
 │                                                                 │
-│  agui_server.py ──→ launch_sessions.py ──→ acpx CLI             │
+│  agui_server.py ──→ launch_sessions.py ──→ acpx CLI            │
 │       │                                       │                 │
 │  acp_to_agui.py                               │                 │
 │  (traduce ACP → AG-UI)                        ▼                 │
-│                                          Agente (opencode,      │
-│                                          claude, codex, etc.)   │
+│                                          Agente (opencode,     │
+│                                          claude, codex, etc.)  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -225,27 +229,54 @@ agent-harness-orchestrator/
 │   ├── available_models.py     # Listas de modelos soportados (OpenCode + Copilot CLI)
 │   ├── remove_session.py       # Utilidad de limpieza de sesiones
 │   ├── requirements.txt        # Dependencias Python
+│   ├── Dockerfile              # Imagen Docker del backend
 │   ├── pytest.ini              # Configuración pytest
-│   └── tests/                  # Tests unitarios
+│   └── tests/                  # Tests unitarios (8 archivos, 70+ tests)
 │       ├── test_acp_to_agui.py
 │       ├── test_agui_server.py
 │       ├── test_session.py
 │       ├── test_remove_session.py
-│       └── test_utf8_encoding.py
+│       ├── test_utf8_encoding.py
+│       ├── test_history_persistence.py
+│       ├── test_reconnect_timeout.py
+│       └── test_tool_call_lifecycle.py
 ├── frontend/
 │   ├── app/
-│   │   ├── page.tsx            # UI principal: sidebar + paneles de chat multi-sesión
+│   │   ├── page.tsx            # Home: layout multi-panel, polling de estado, broadcast
 │   │   ├── layout.tsx          # Layout raíz Next.js
-│   │   └── globals.css         # Estilos globales (Tailwind)
+│   │   ├── providers.tsx       # Providers de la app
+│   │   ├── types.ts            # Tipos TypeScript (sesiones, estado, métricas, config)
+│   │   ├── hooks.ts            # Hooks custom (useAccentColor)
+│   │   ├── globals.css         # Estilos globales (Tailwind v4)
+│   │   └── components/
+│   │       ├── ChatPanel.tsx       # Panel de chat con CopilotKit + historial + broadcast
+│   │       ├── Sidebar.tsx         # Sidebar colapsable: sesiones, tema, controles
+│   │       ├── SessionForm.tsx     # Modal de creación de sesión con workspace/skills
+│   │       ├── SessionListItem.tsx # Fila de sesión con indicadores de estado y salud
+│   │       ├── BroadcastForm.tsx   # Formulario de broadcast a todos los paneles
+│   │       └── ThemePanel.tsx      # Selector de tema y color de acento
+│   ├── Dockerfile              # Imagen Docker del frontend
 │   └── package.json
+├── agents/                     # Workspaces de agentes con skills especializados
+│   ├── debugging/
+│   │   ├── opencode.json           # Config: modelo, provider, instrucciones
+│   │   └── .opencode/skills/
+│   │       └── systematic-debugging/
+│   │           └── SKILL.md        # Skill de debugging sistemático
+│   └── documentation/
+│       ├── opencode.json           # Config: modelo, provider, instrucciones
+│       └── .opencode/skills/
+│           └── ddf/
+│               ├── SKILL.md            # Skill de documentación funcional (DDF)
+│               ├── references/         # Templates y checklists de calidad
+│               └── section-generators/ # Generadores por sección (12 secciones)
 ├── sessions/                   # Índice local de sesiones
 │   ├── index.json              # Metadata de sesiones (nombre, harness, modelo, fechas)
 │   └── history/                # Historial propio de conversaciones (preserva formato markdown)
-├── opencode.json               # Configuración de modelos y providers para OpenCode
+├── opencode.json               # Configuración de modelos y providers para OpenCode (raíz)
+├── docker-compose.yml          # Docker Compose: backend (8000) + frontend (3000)
 ├── run.py                      # Launcher del backend desde la raíz del proyecto
 ├── dev.ps1                     # Script para lanzar backend + frontend + abrir navegador
-├── agent_debugging/            # Directorio de trabajo para agentes de debugging
-├── agent_documentation/        # Directorio de trabajo para agentes de documentación
 └── docs/                       # Documentación adicional
 ```
 
@@ -253,15 +284,46 @@ agent-harness-orchestrator/
 
 ## Funcionalidades
 
-- **Sesiones multi-agente** — Ejecutar múltiples agentes en paralelo, cada uno con su modelo, directorio de trabajo y configuración
-- **100+ modelos soportados** — AWS Bedrock (Claude, Llama, Mistral, Qwen, DeepSeek, ...), NagaAI (gratis) y OpenCode Zen (gratis)
-- **16 harnesses de agente** — OpenCode, Claude Code, Codex, Gemini, Cursor, Copilot, Kiro, Qwen, Kimi, Kilocode, iFlow, Droid, OpenClaw, Pi, Qoder, Trae
-- **Interfaz multi-panel** — Abrir múltiples chats lado a lado en el navegador
-- **Broadcast** — Enviar el mismo prompt a todas las sesiones abiertas simultáneamente
-- **Estado en tiempo real** — Indicadores visuales por sesión: idle, thinking, tool_use, responding
-- **Persistencia de mensajes** — Historial de chat guardado en `sessions/history/` con formato markdown preservado. Se restaura al recargar la página
-- **Sidebar colapsable** — Más espacio para los paneles cuando se necesita
-- **Almacenamiento local de sesiones** — Índice propio en `sessions/index.json`, con fallback a `~/.acpx/sessions/`
+### Sesiones Multi-Agente
+Ejecutar múltiples agentes en paralelo, cada uno con su modelo, directorio de trabajo y configuración independiente.
+
+### 100+ Modelos Soportados
+AWS Bedrock (Claude, Llama, Mistral, Qwen, DeepSeek, Nova, ...), NagaAI (7 modelos gratuitos) y OpenCode Zen (6 modelos gratuitos).
+
+### 16 Harnesses de Agente
+OpenCode, Claude Code, Codex, Gemini, Cursor, Copilot, Kiro, Qwen, Kimi, Kilocode, iFlow, Droid, OpenClaw, Pi, Qoder, Trae.
+
+### Workspaces de Agentes con Skills
+Directorios especializados en `agents/` con su propio `opencode.json`, modelos y skills. El backend auto-descubre workspaces via `GET /workspaces` y expone los skills disponibles (parseados desde YAML frontmatter en archivos `.md`). Actualmente existen:
+- **debugging** — Skill de debugging sistemático (root-cause tracing, defense in depth, test isolation)
+- **documentation** — Skill de Documentación de Diseño Funcional (DDF) con 12 secciones, templates y checklists de calidad
+
+### Tool Calling Completo
+Ciclo de vida completo de tool calls: `ToolCallStartEvent` → `ToolCallChunkEvent` (nombre + args) → `ToolCallResultEvent`. Deduplicación por ID, tracking de tool calls abiertos/cerrados, soporte para estados intermedios via `CustomEvent`.
+
+### Interfaz Multi-Panel
+Abrir múltiples chats lado a lado en el navegador. Componentes modulares: `ChatPanel`, `Sidebar`, `SessionForm`, `SessionListItem`, `BroadcastForm`, `ThemePanel`.
+
+### Broadcast
+Enviar el mismo prompt a todas las sesiones abiertas simultáneamente. Formulario muestra conteo de paneles activos y estado de envío.
+
+### Estado en Tiempo Real
+Indicadores visuales por sesión: `idle`, `thinking`, `tool_use`, `responding`. Polling cada 1.5 segundos.
+
+### Health Check y Reconexión
+Cada sesión reporta su salud: `connected`, `disconnected`, `reconnecting`. Endpoint `POST /sessions/{name}/reconnect` para reconectar sesiones caídas con cooldown de 10 segundos. Indicadores visuales en la UI.
+
+### Métricas por Sesión
+Endpoint `GET /sessions/metrics` con estadísticas por sesión: turnos, caracteres de texto/thinking, tool calls totales, tiempos de respuesta (total, promedio, último), métricas del último turno.
+
+### Persistencia de Mensajes
+Historial de chat guardado en `sessions/history/` con formato markdown preservado (saltos de línea, listas, código). Se restaura al recargar la página. Fallback a historial de acpx si no existe historial propio.
+
+### Temas y Personalización
+Modo claro/oscuro con toggle. 6 colores de acento seleccionables (Blue, Violet, Rose, Amber, Emerald, Cyan). Sidebar colapsable para maximizar espacio de paneles.
+
+### Almacenamiento Local de Sesiones
+Índice propio en `sessions/index.json`, con fallback a `~/.acpx/sessions/`. Historial de conversaciones con formato preservado en `sessions/history/`.
 
 ---
 
@@ -297,7 +359,15 @@ cd frontend && npm install && cd ..
 
 ## Inicio Rápido
 
-### Opción 1: Script de desarrollo (recomendado)
+### Opción 1: Docker Compose
+
+```bash
+docker compose up --build
+```
+
+Backend en `http://localhost:8000`, frontend en `http://localhost:3000`.
+
+### Opción 2: Script de desarrollo
 
 ```powershell
 .\dev.ps1
@@ -305,7 +375,7 @@ cd frontend && npm install && cd ..
 
 Lanza backend + frontend en terminales separadas y abre el navegador en `http://localhost:3000`.
 
-### Opción 2: Manual
+### Opción 3: Manual
 
 ```bash
 # Terminal 1 — Backend
@@ -317,7 +387,7 @@ cd frontend && npm run dev
 
 Abrir `http://localhost:3000` en el navegador.
 
-### Opción 3: Uso programático (sin frontend)
+### Opción 4: Uso programático (sin frontend)
 
 ```python
 from backend.launch_sessions import Session
@@ -325,7 +395,7 @@ from backend.launch_sessions import Session
 session = Session(
     agent_harness="opencode",
     name="mi_agente",
-    working_dir="./agent_debugging",
+    working_dir="./agents/debugging",
     LLM="opencode/big-pickle",
 )
 
@@ -345,7 +415,10 @@ session.close_session()
 | `POST` | `/sessions` | Crear nueva sesión |
 | `DELETE` | `/sessions/{nombre}` | Cerrar y eliminar sesión |
 | `GET` | `/sessions/{nombre}/history` | Historial de conversación (con formato preservado) |
-| `GET` | `/sessions/status` | Estado de actividad de cada sesión |
+| `GET` | `/sessions/status` | Estado de actividad y salud de cada sesión |
+| `GET` | `/sessions/metrics` | Métricas de rendimiento por sesión |
+| `POST` | `/sessions/{nombre}/reconnect` | Reconectar sesión desconectada |
+| `GET` | `/workspaces` | Auto-descubrir workspaces de agentes con skills |
 | `GET` | `/models/{harness}` | Modelos disponibles para un harness |
 | `POST` | `/agent/{nombre}` | Endpoint AG-UI — streaming SSE de conversación |
 
@@ -359,6 +432,50 @@ session.close_session()
   "LLM": "opencode/big-pickle"
 }
 ```
+
+### Respuesta de métricas (GET /sessions/metrics)
+
+```json
+{
+  "mi_sesion": {
+    "turns": 5,
+    "total_text_chars": 12340,
+    "total_thinking_chars": 4500,
+    "total_tool_calls": 8,
+    "total_response_time_ms": 45000,
+    "avg_response_time_ms": 9000,
+    "last_response_time_ms": 7200,
+    "last_tool_calls": 2,
+    "last_text_chars": 1800,
+    "last_thinking_chars": 600
+  }
+}
+```
+
+---
+
+## Componentes Frontend
+
+| Componente | Archivo | Descripción |
+|------------|---------|-------------|
+| **Home** | `page.tsx` | Layout principal: multi-panel + sidebar, polling de estado, gestión de agentes HttpAgent |
+| **ChatPanel** | `components/ChatPanel.tsx` | Panel de chat individual con CopilotKit, carga de historial, recepción de broadcast |
+| **Sidebar** | `components/Sidebar.tsx` | Sidebar colapsable: lista de sesiones, creación/eliminación, tema, broadcast |
+| **SessionForm** | `components/SessionForm.tsx` | Modal para crear sesión: harness, modelo, workspace con skills |
+| **SessionListItem** | `components/SessionListItem.tsx` | Fila de sesión: indicadores de estado (pulsing dot), salud, directorio de trabajo |
+| **BroadcastForm** | `components/BroadcastForm.tsx` | Formulario para enviar prompt a todos los paneles abiertos |
+| **ThemePanel** | `components/ThemePanel.tsx` | Selector de tema claro/oscuro y color de acento |
+
+### Tipos TypeScript (`types.ts`)
+
+| Tipo | Descripción |
+|------|-------------|
+| `SessionStatus` | `"idle" \| "thinking" \| "tool_use" \| "responding"` |
+| `SessionHealth` | `"connected" \| "disconnected" \| "reconnecting"` |
+| `SessionMetrics` | Turnos, caracteres, tool calls, tiempos de respuesta |
+| `AcpxSession` | Sesión de acpx: nombre, cwd, closed, lastUsedAt |
+| `ModelData` | Grupos de modelos con default |
+| `HistoryEntry` | Mensaje de historial: role, content, thinking |
 
 ---
 
@@ -374,6 +491,30 @@ El traductor `acp_to_agui.py` mapea notificaciones ACP a eventos AG-UI:
 | `tool_call_update` (completed/failed) | `ToolCallResultEvent` | Resultado de la herramienta |
 | `tool_call_update` (otros) | `CustomEvent` | Estados intermedios |
 | Cualquier otro | `CustomEvent` | Eventos desconocidos preservados |
+
+---
+
+## Workspaces de Agentes
+
+Los workspaces son directorios en `agents/` que contienen un `opencode.json` y skills especializados. El backend los auto-descubre y los expone en el formulario de creación de sesiones.
+
+### Estructura de un workspace
+
+```
+agents/{nombre}/
+├── opencode.json                    # Modelo, provider, instrucciones
+└── .opencode/skills/{skill-name}/
+    ├── SKILL.md                     # Instrucciones del skill (YAML frontmatter + markdown)
+    └── references/                  # Archivos de referencia opcionales
+```
+
+### Workspaces disponibles
+
+| Workspace | Modelo por defecto | Skill | Descripción |
+|-----------|-------------------|-------|-------------|
+| **root** | (configurable) | — | Workspace genérico sin skills |
+| **debugging** | `opencode/minimax-m2.5-free` | systematic-debugging | Root-cause tracing, defense in depth, test isolation |
+| **documentation** | `opencode/minimax-m2.5-free` | ddf | Documentación de Diseño Funcional: 12 secciones, templates, checklists |
 
 ---
 
@@ -400,6 +541,35 @@ El traductor `acp_to_agui.py` mapea notificaciones ACP a eventos AG-UI:
 
 ---
 
+## Docker
+
+### Docker Compose (recomendado)
+
+```bash
+docker compose up --build
+```
+
+| Servicio | Puerto | Imagen base |
+|----------|--------|-------------|
+| backend | 8000 | Python 3.12-slim + Node.js 18 + acpx + opencode-ai |
+| frontend | 3000 | Node 20 Alpine |
+
+Variables de entorno via archivo `.env`. Volumen `./sessions` montado en `/project/sessions` para persistencia.
+
+### Dockerfiles individuales
+
+```bash
+# Backend
+docker build -t aho-backend ./backend
+docker run -p 8000:8000 --env-file .env aho-backend
+
+# Frontend
+docker build -t aho-frontend ./frontend
+docker run -p 3000:3000 aho-frontend
+```
+
+---
+
 ## Tests
 
 ```bash
@@ -407,7 +577,18 @@ cd backend
 python -m pytest tests/ -v
 ```
 
-70 tests cubriendo: traducción ACP→AG-UI, endpoints del servidor, validación de modelos, gestión de sesiones, limpieza y codificación UTF-8.
+70+ tests en 8 archivos cubriendo:
+
+| Archivo | Cobertura |
+|---------|-----------|
+| `test_acp_to_agui.py` | Traducción ACP → AG-UI para todos los tipos de evento |
+| `test_agui_server.py` | Endpoints del servidor: sesiones, modelos, workspaces, agentes |
+| `test_session.py` | Ciclo de vida de sesión: crear, stream, cerrar |
+| `test_remove_session.py` | Limpieza de sesiones |
+| `test_utf8_encoding.py` | Codificación UTF-8 con caracteres especiales |
+| `test_history_persistence.py` | Persistencia de historial con formato markdown |
+| `test_reconnect_timeout.py` | Reconexión con cooldown y timeouts |
+| `test_tool_call_lifecycle.py` | Ciclo de vida completo de tool calls: start → chunks → result |
 
 ---
 
@@ -419,9 +600,13 @@ python -m pytest tests/ -v
 | **2** | Frontend web con CopilotKit + AG-UI | Completado |
 | **3** | Almacenamiento local de sesiones (pre-DB) | Completado |
 | **4** | Docker Compose (backend + frontend) | Completado |
-| **5** | Base de datos para sesiones (reemplazar JSON) | Planificado |
-| **6** | Bucle de reacción GitHub (`githubkit`) | Planificado |
-| **7** | Coordinación multi-agente (descomposición de tareas) | Planificado |
+| **5** | Workspaces de agentes con skills especializados | Completado |
+| **6** | Health checks, reconexión y métricas | Completado |
+| **7** | Tool calling completo (ciclo de vida ACP → AG-UI) | Completado |
+| **8** | Componentes frontend modulares (ChatPanel, Sidebar, SessionForm, etc.) | Completado |
+| **9** | Base de datos para sesiones (reemplazar JSON) | Planificado |
+| **10** | Bucle de reacción GitHub (`githubkit`) | Planificado |
+| **11** | Coordinación multi-agente (descomposición de tareas) | Planificado |
 
 ---
 
