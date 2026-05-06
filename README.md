@@ -38,6 +38,173 @@ Framework React para aplicaciones web. Usado aquí como base del frontend (v16).
 
 ---
 
+## Modelo de Agentes: CLI Agents
+
+Este proyecto **no crea agentes**. **Orquesta agentes que ya existen** como programas de línea de comandos (CLI).
+
+### Qué es un Agente CLI
+
+Un agente CLI es un programa completo instalado en la máquina que ya trae todo lo necesario para funcionar de forma autónoma:
+
+```
+npm install -g opencode-ai       # Instala el agente CLI "opencode"
+npm install -g @anthropic-ai/claude-code  # Instala el agente CLI "claude"
+npm install -g @openai/codex     # Instala el agente CLI "codex"
+```
+
+Cada agente CLI contiene internamente:
+
+```
+Agente CLI (ej. opencode, claude, codex)
+├── LLM client         ← Conecta con API del modelo (NagaAI, Bedrock, Anthropic...)
+├── System prompt       ← Instrucciones base del agente
+├── Tools integradas    ← read_file, write_file, bash, grep, glob, git, LSP, MCP...
+├── Loop de ejecución   ← Prompt → LLM → Tool call → Resultado → LLM → Respuesta
+├── Context management  ← Gestión de ventana de contexto del LLM
+├── Session manager     ← Crear, persistir, restaurar sesiones
+└── Terminal UI         ← Interfaz interactiva (la que NO usamos)
+```
+
+Son agentes completos y autosuficientes: reciben un prompt, deciden qué herramientas usar, ejecutan acciones, iteran hasta completar la tarea. No son chatbots simples — tienen el loop agente completo:
+
+```
+Chatbot simple:     Prompt → LLM → Respuesta. Fin.
+
+Agente CLI:         Prompt → LLM → "Necesito leer main.py"
+                                  → Ejecuta read_file(main.py)
+                                  → Resultado al LLM
+                                  → "Voy a corregir el bug"
+                                  → Ejecuta write_file(main.py, ...)
+                                  → Resultado al LLM
+                                  → "Ejecuto los tests"
+                                  → Ejecuta bash("pytest")
+                                  → Resultado al LLM
+                                  → "Bug corregido. Esto es lo que hice: ..."
+```
+
+### Por qué Agentes CLI y no un Framework de Agentes
+
+Este proyecto **no usa LangChain, LangGraph, CrewAI, Google ADK, AutoGen, ni ningún framework de creación de agentes**. La razón: no necesita construir agentes, solo orquestarlos.
+
+```
+Frameworks de agentes (LangGraph, CrewAI, ADK...):
+  → TÚ defines: tools, prompts, estado, memoria, routing
+  → El agente VIVE dentro de tu código
+  → Necesitas meses para igualar un producto maduro
+
+Este proyecto:
+  → Solo: elige qué CLI lanzar, configura modelo, pasa prompt, traduce eventos
+  → El agente VIVE fuera, como producto ya terminado
+  → Los agentes ya tienen miles de horas de ingeniería
+```
+
+| Aspecto | Framework (ej. LangGraph) | Este proyecto (CLI agents) |
+|---------|--------------------------|---------------------------|
+| Define tools | Tú en Python | Ya built-in en el CLI |
+| Define loop agente | Tú diseñas el grafo | Ya implementado en el CLI |
+| Conecta al LLM | Tú via LangChain | Tú via opencode.json |
+| System prompt | Tú en código | Via skills (.md) en config |
+| Tiempo hasta funcionar | Horas/días | `npm install` y funciona |
+| Personalización | Total | Limitada (skills, config, plugins) |
+| Dominio | Cualquiera | Codificación |
+
+### Qué controla el Orquestador vs Qué controla el Agente
+
+| Aspecto | Quién lo controla | Cómo |
+|---------|------------------|------|
+| **Qué agente usar** | Orquestador | Parámetro `agent_harness` al crear sesión |
+| **Qué modelo LLM** | Orquestador | Escribe `model` en `opencode.json` |
+| **Directorio de trabajo** | Orquestador | `cwd` del subprocess |
+| **Skills/instrucciones** | Orquestador | Campo `instructions` en `opencode.json` → archivos `.md` |
+| **Provider LLM** | Orquestador | Campo `provider` en `opencode.json` |
+| **Qué tools tiene** | Agente CLI | Built-in (read, write, bash, grep...) — no modificable |
+| **Cómo razona** | Agente CLI | Loop interno propio |
+| **Cuándo usar tools** | Agente CLI | Decide el LLM en cada paso |
+| **Context management** | Agente CLI | Ventana de contexto propia |
+| **Memoria de sesión** | Agente CLI | Gestión interna de sesiones |
+
+### Tools vs Skills
+
+```
+Tools  = CAPACIDADES del agente (funciones que puede ejecutar). Vienen instaladas con el CLI.
+Skills = ESTRATEGIAS de razonamiento (cómo usar esas tools). Las defines tú en archivos .md.
+```
+
+| | Tools | Skills |
+|-|-------|--------|
+| **Ejemplo** | `read_file`, `bash`, `write_file` | "Cuando debuggees, primero reproduce el error" |
+| **Quién las define** | El agente CLI (built-in) | Tú (archivo `.md` en workspace) |
+| **Tipadas** | Sí (schema JSON) | No (instrucciones en lenguaje natural) |
+| **Testeables** | Internamente por el CLI | No directamente |
+| **Dónde están** | Dentro del binario del CLI | `agents/{workspace}/.opencode/skills/` |
+
+### Comunicación Backend ↔ Agente
+
+El backend nunca habla directamente con LLMs. Todo pasa por `acpx` como intermediario:
+
+```
+Frontend ──AG-UI/SSE──► Backend (FastAPI) ──ACP/stdin/stdout──► acpx ──► Agente CLI
+                                                                              │
+                                                                              ▼
+                                                                         LLM Provider
+                                                                    (NagaAI, Bedrock, etc.)
+```
+
+Hay dos protocolos distintos en capas diferentes:
+
+| Protocolo | Dónde | Dirección | Formato |
+|-----------|-------|-----------|---------|
+| **AG-UI** | Frontend ↔ Backend | SSE (Server-Sent Events) via HTTP | Eventos tipados (RunStarted, TextMessageChunk, ToolCallChunk...) |
+| **ACP** | Backend ↔ acpx ↔ Agente | JSON-RPC via stdin/stdout (subprocess) | Notificaciones NDJSON (agent_message_chunk, tool_call...) |
+
+El traductor `acp_to_agui.py` convierte eventos ACP en eventos AG-UI. El frontend nunca ve ACP; el agente nunca ve AG-UI.
+
+### Caso de ejemplo: OpenCode
+
+OpenCode es un agente de codificación open-source construido con TypeScript y Bun. No usa frameworks de agentes — implementa su propio loop agente, tools, plugin system y servidor HTTP interno. [opencode.ai](https://opencode.ai)
+
+Cuando el orquestador lanza OpenCode en el workspace "debugging":
+
+```
+1. Orquestador escribe modelo en agents/debugging/opencode.json
+2. Orquestador ejecuta: acpx opencode -s mi_sesion -f -  (cwd=agents/debugging/)
+3. OpenCode arranca:
+   a. Lee agents/debugging/opencode.json
+   b. Carga skill: .opencode/skills/systematic-debugging/SKILL.md
+   c. Conecta al LLM (NagaAI, modelo minimax-m2.5-free)
+   d. Espera prompt por stdin
+4. Llega prompt "Arregla el bug en auth.py":
+   a. Usa read_file → lee auth.py                        (tool built-in)
+   b. Usa bash → ejecuta pytest                           (tool built-in)
+   c. Razona siguiendo el skill de debugging              (estrategia del .md)
+   d. Usa write_file → corrige el bug                     (tool built-in)
+   e. Responde al usuario con resumen
+```
+
+### Extensibilidad: Agentes Framework como Harness Adicional
+
+La arquitectura soporta añadir agentes basados en frameworks (LangGraph, Google ADK, CrewAI) como harnesses adicionales, sin reemplazar los CLI existentes:
+
+```
+harness="opencode"    → subprocess → acpx → OpenCode CLI    (existente, sin cambios)
+harness="claude"      → subprocess → acpx → Claude CLI      (existente, sin cambios)
+harness="langgraph"   → Python directo → LangGraph agent    (futuro, coexiste)
+harness="adk"         → Python directo → Google ADK agent   (futuro, coexiste)
+```
+
+Un agente framework correría directo en Python (sin subprocess, sin acpx, sin traducción ACP→AG-UI) y emitiría eventos AG-UI directamente. Sería más rápido y permitiría tools custom (APIs internas, bases de datos, etc.), pero requiere construir el agente desde cero.
+
+| Necesidad | CLI agents basta? | Framework necesario? |
+|-----------|-------------------|---------------------|
+| Tareas de codificación | Sí | No |
+| Comparar agentes en paralelo | Sí | No |
+| Skills de estrategia | Sí | No |
+| Tools custom (Jira, DB, APIs internas) | No | Sí |
+| Coordinación entre agentes (deep agents) | No | Sí |
+| Dominios no-código (soporte, análisis) | No | Sí |
+
+---
+
 ## Arquitectura General
 
 ```
@@ -606,7 +773,8 @@ python -m pytest tests/ -v
 | **8** | Componentes frontend modulares (ChatPanel, Sidebar, SessionForm, etc.) | Completado |
 | **9** | Base de datos para sesiones (reemplazar JSON) | Planificado |
 | **10** | Bucle de reacción GitHub (`githubkit`) | Planificado |
-| **11** | Coordinación multi-agente (descomposición de tareas) | Planificado |
+| **11** | Harnesses framework (LangGraph, Google ADK) — agentes custom con tools propias | Planificado |
+| **12** | Coordinación multi-agente / deep agents (supervisor → workers) | Planificado |
 
 ---
 
