@@ -106,13 +106,36 @@ SUPPORTED_MODELS_OPENCODE = [
 
 SUPPORTED_MODELS_COPILOT_CLI=[
     "claude-sonnet-4.6",
-    "claude-sonnet-4.5", 
-    "claude-haiku-4.5", 
-    "claude-opus-4.6", 
-    "claude-opus-4.5", 
-    "gpt-5.4", 
-    "gpt-5.3-codex", 
-    "gpt-5.4-mini", 
-    "gpt-5-mini", 
+    "claude-sonnet-4.5",
+    "claude-haiku-4.5",
+    "claude-opus-4.6",
+    "claude-opus-4.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.4-mini",
+    "gpt-5-mini",
     "gpt-4.1"
+]
+
+# Models supported by the in-process LangGraph harness.
+# Only models with CONFIRMED native tool calling support.
+# Format: "<provider>/<model_id>" — provider prefix selects the langchain integration.
+SUPPORTED_MODELS_LANGGRAPH = [
+    # --- OpenAI (paid, requires OPENAI_API_KEY) ---
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "openai/gpt-4.1",
+    "openai/gpt-4.1-mini",
+    # --- Anthropic (paid, requires ANTHROPIC_API_KEY) ---
+    "anthropic/claude-sonnet-4-5-20250929",
+    "anthropic/claude-haiku-4-5-20251001",
+    "anthropic/claude-opus-4-5-20251101",
+    # --- Google (free tier available, requires GOOGLE_API_KEY) ---
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-pro",
+    # --- Groq (FREE, very fast, requires GROQ_API_KEY) ---
+    "groq/llama-3.3-70b-versatile",
+    "groq/qwen-2.5-32b",
+    "groq/gemma2-9b-it",
+    "groq/llama-3.1-8b-instant",
 ]

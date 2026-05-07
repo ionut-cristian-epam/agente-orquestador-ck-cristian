@@ -49,6 +49,7 @@ export const DEFAULT_HARNESSES = [
   "gemini",
   "cursor",
   "copilot",
+  "langgraph",
 ];
 
 export type ModelData = { groups: Record<string, string[]>; default: string };

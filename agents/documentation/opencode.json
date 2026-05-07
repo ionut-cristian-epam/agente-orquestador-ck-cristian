@@ -1,7 +1,9 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/minimax-m2.5-free",
-  "instructions": [".opencode/skills/ddf/SKILL.md"],
+  "model": "nagaai/glm-4.5-air:free",
+  "instructions": [
+    ".opencode/skills/ddf/SKILL.md"
+  ],
   "provider": {
     "nagaai": {
       "npm": "@ai-sdk/openai-compatible",

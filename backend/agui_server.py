@@ -58,8 +58,13 @@ from ag_ui.encoder import EventEncoder
 
 from launch_sessions import Session
 from acp_to_agui import map_acp_event
-from available_models import SUPPORTED_MODELS_OPENCODE, SUPPORTED_MODELS_COPILOT_CLI
+from available_models import (
+    SUPPORTED_MODELS_OPENCODE,
+    SUPPORTED_MODELS_COPILOT_CLI,
+    SUPPORTED_MODELS_LANGGRAPH,
+)
 from remove_session import remove_session
+from langgraph_session import LangGraphSession
 
 PROJECT_ROOT = Path(
     os.environ.get("AGENT_ORCH_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
@@ -75,7 +80,7 @@ HISTORY_DIR.mkdir(exist_ok=True)
 # Legacy fallback: acpx still writes to ~/.acpx/sessions
 ACPX_SESSIONS_DIR = Path.home() / ".acpx" / "sessions"
 
-_sessions: dict[str, Session] = {}
+_sessions: dict[str, "Session | LangGraphSession"] = {}
 
 # Per-session activity status: "idle" | "thinking" | "tool_use" | "responding"
 _session_status: dict[str, str] = {}
@@ -164,6 +169,7 @@ KNOWN_HARNESSES = (
     "opencode", "claude", "codex", "gemini", "cursor", "copilot",
     "kiro", "qwen", "kimi", "kilocode", "iflow", "droid", "openclaw",
     "pi", "qoder", "trae",
+    "langgraph",
 )
 
 
@@ -231,7 +237,7 @@ def _find_session_entry(name: str) -> Optional[dict]:
     return None
 
 
-def _attach_existing(name: str) -> Optional[Session]:
+def _attach_existing(name: str) -> "Session | LangGraphSession | None":
     entry = _find_session_entry(name)
     if not entry:
         return None
@@ -241,6 +247,18 @@ def _attach_existing(name: str) -> Optional[Session]:
         (h for h in KNOWN_HARNESSES if h in cmd), "opencode"
     )
 
+    if harness == "langgraph":
+        # Re-instantiate the in-process LangGraph session and rehydrate history
+        sess = LangGraphSession(
+            name=name,
+            working_dir=cwd,
+            LLM=entry.get("LLM"),
+        )
+        history = _load_own_history(name)
+        if history:
+            sess.restore_history(history)
+        return sess
+
     sess = Session.__new__(Session)
     sess.agent_harness = harness
     sess.name = name
@@ -249,7 +267,7 @@ def _attach_existing(name: str) -> Optional[Session]:
     return sess
 
 
-def _get_or_attach(name: str) -> Session:
+def _get_or_attach(name: str) -> "Session | LangGraphSession":
     name = _normalize_name(name)
     if name in _sessions:
         return _sessions[name]
@@ -333,31 +351,68 @@ def _parse_skill_frontmatter(skill_path: Path) -> dict:
 
 
 def _scan_skills(workspace_path: Path) -> list[dict]:
-    """Scan the skills/ directory of a workspace and return skill metadata."""
+    """Scan the skills/ directory of a workspace and return skill metadata.
+
+    Supports two layouts (matching the OpenCode convention):
+      - Flat: skills/{name}.md
+      - Subdir: skills/{name}/SKILL.md
+    """
     skills_dir = workspace_path / "skills"
     if not skills_dir.is_dir():
         return []
     skills = []
-    for f in sorted(skills_dir.iterdir()):
-        if f.suffix == ".md" and f.is_file():
-            meta = _parse_skill_frontmatter(f)
-            skills.append(meta)
+    for entry in sorted(skills_dir.iterdir()):
+        if entry.is_file() and entry.suffix == ".md":
+            skills.append(_parse_skill_frontmatter(entry))
+        elif entry.is_dir():
+            skill_md = entry / "SKILL.md"
+            if skill_md.is_file():
+                meta = _parse_skill_frontmatter(skill_md)
+                # Prefer the directory name over the file stem for subdir layout
+                if not meta.get("name") or meta["name"] == "SKILL":
+                    meta["name"] = entry.name
+                skills.append(meta)
     return skills
 
 
 @app.get("/workspaces")
 def list_workspaces():
-    """Auto-discover available agent workspaces (directories with opencode.json)."""
-    workspaces = [{"name": "root", "path": str(PROJECT_ROOT), "skills": [], "description": "Generic (no specialized skills)"}]
+    """Auto-discover available agent workspaces.
+
+    Supports two workspace types:
+      - opencode.json -> CLI harness (opencode and 15 others via acpx)
+      - langgraph_agent.json -> in-process LangGraph harness
+    """
+    workspaces = [{
+        "name": "root",
+        "path": str(PROJECT_ROOT),
+        "skills": [],
+        "description": "Generic (no specialized skills)",
+        "harness": None,
+    }]
     if AGENTS_DIR.is_dir():
         for child in sorted(AGENTS_DIR.iterdir()):
-            if child.is_dir() and (child / "opencode.json").exists():
-                skills = _scan_skills(child)
+            if not child.is_dir():
+                continue
+            if (child / "langgraph_agent.json").exists():
+                try:
+                    config = json.loads((child / "langgraph_agent.json").read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    config = {}
                 workspaces.append({
                     "name": child.name,
                     "path": str(child),
-                    "skills": skills,
+                    "skills": _scan_skills(child),
+                    "description": config.get("description", f"LangGraph: {child.name}"),
+                    "harness": "langgraph",
+                })
+            elif (child / "opencode.json").exists():
+                workspaces.append({
+                    "name": child.name,
+                    "path": str(child),
+                    "skills": _scan_skills(child),
                     "description": f"Agent: {child.name}",
+                    "harness": "opencode",
                 })
     return workspaces
 
@@ -369,15 +424,25 @@ def create_session(req: CreateSessionRequest):
     print(f"[create_session] normalized name: {normalized_name!r} (len={len(normalized_name)})", flush=True)
     if normalized_name in _sessions:
         return {"status": "exists", "name": normalized_name}
-    kwargs = dict(
-        agent_harness=req.agent_harness,
-        name=normalized_name,
-        working_dir=req.working_dir,
-        capture_output=True,
-    )
-    if req.LLM:
-        kwargs["LLM"] = req.LLM
-    sess = Session(**kwargs)
+
+    if req.agent_harness == "langgraph":
+        # In-process LangGraph agent — no acpx subprocess
+        sess = LangGraphSession(
+            name=normalized_name,
+            working_dir=req.working_dir,
+            LLM=req.LLM,
+        )
+    else:
+        kwargs = dict(
+            agent_harness=req.agent_harness,
+            name=normalized_name,
+            working_dir=req.working_dir,
+            capture_output=True,
+        )
+        if req.LLM:
+            kwargs["LLM"] = req.LLM
+        sess = Session(**kwargs)
+
     _sessions[normalized_name] = sess
     _session_health[normalized_name] = "connected"
     _add_to_local_index({
@@ -440,15 +505,27 @@ def delete_session(name: str):
     _session_status.pop(name, None)
     _session_health.pop(name, None)
     _session_metrics.pop(name, None)
+
+    # Try to attach if not in memory, but tolerate failure (e.g. missing API key
+    # for langgraph sessions). Deletion should always succeed if the session
+    # exists in either local or acpx index.
     if sess is None:
-        sess = _attach_existing(name)
-    if sess is None:
+        try:
+            sess = _attach_existing(name)
+        except Exception as e:
+            print(f"[delete_session] _attach_existing failed: {e!r}", flush=True)
+            sess = None
+
+    entry = _find_session_entry(name)
+    if sess is None and entry is None:
         raise HTTPException(404, f"Session '{name}' not found")
+
     remove_session(name)
-    try:
-        sess.close_session()
-    except Exception:
-        pass
+    if sess is not None:
+        try:
+            sess.close_session()
+        except Exception:
+            pass
     # Clean up our own history file
     hp = _history_path(name)
     if hp.exists():
@@ -459,7 +536,10 @@ def delete_session(name: str):
 
 @app.post("/sessions/{name}/reconnect")
 def reconnect_session(name: str):
-    """Attempt to reconnect a disconnected session's acpx process."""
+    """Attempt to reconnect a disconnected session's acpx process.
+
+    No-op for langgraph sessions (always connected, in-process).
+    """
     name = _normalize_name(name)
     sess = _get_or_attach(name)
     _session_health[name] = "reconnecting"
@@ -472,9 +552,19 @@ def reconnect_session(name: str):
         raise HTTPException(500, f"Reconnect failed: {e}")
 
 
+@app.get("/sessions/{name}/tools")
+def get_session_tools(name: str):
+    """Return list of tools available to a session (LangGraph only, CLI agents don't expose tools)."""
+    name = _normalize_name(name)
+    sess = _get_or_attach(name)
+    tools = getattr(sess, "available_tools", [])
+    return {"session": name, "tools": tools}
+
+
 _MODELS_BY_HARNESS: dict[str, dict[str, list[str]]] = {
     "opencode": {},
     "copilot": {"Copilot CLI": SUPPORTED_MODELS_COPILOT_CLI},
+    "langgraph": {},
 }
 
 for _m in SUPPORTED_MODELS_OPENCODE:
@@ -486,6 +576,19 @@ for _m in SUPPORTED_MODELS_OPENCODE:
     }.get(_provider, _provider)
     _MODELS_BY_HARNESS["opencode"].setdefault(_label, []).append(_m)
 
+for _m in SUPPORTED_MODELS_LANGGRAPH:
+    _provider = _m.split("/")[0]
+    _label = {
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+        "google": "Google",
+        "groq": "Groq (Free)",
+        "cerebras": "Cerebras (Free, fastest)",
+        "nagaai": "NagaAI (Free)",
+        "openrouter": "OpenRouter (Free tier)",
+    }.get(_provider, _provider)
+    _MODELS_BY_HARNESS["langgraph"].setdefault(_label, []).append(_m)
+
 
 @app.get("/models/{harness}")
 def get_models(harness: str):
@@ -495,6 +598,65 @@ def get_models(harness: str):
     flat = [m for models in groups.values() for m in models]
     default = flat[0] if flat else ""
     return {"groups": groups, "default": default}
+
+
+def _get_workspace_skill_info(working_dir: Optional[str], harness: str) -> Optional[dict]:
+    """Return skill metadata for any workspace type, or None.
+
+    Detects:
+      - LangGraph workspaces: langgraph_agent.json -> system_prompt_file
+      - OpenCode (and CLI agent) workspaces: opencode.json -> instructions[0]
+
+    Returns dict with: skill_name, skill_path, prompt_chars (or None).
+    """
+    if not working_dir:
+        return None
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return None
+
+    skill_path_rel: Optional[str] = None
+
+    lg_config = wd / "langgraph_agent.json"
+    oc_config = wd / "opencode.json"
+
+    if lg_config.exists():
+        try:
+            cfg = json.loads(lg_config.read_text(encoding="utf-8"))
+            skill_path_rel = cfg.get("system_prompt_file")
+        except (json.JSONDecodeError, OSError):
+            return None
+    elif oc_config.exists():
+        try:
+            cfg = json.loads(oc_config.read_text(encoding="utf-8"))
+            instructions = cfg.get("instructions") or []
+            if instructions:
+                skill_path_rel = instructions[0]
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    if not skill_path_rel:
+        return None
+
+    skill_path = wd / skill_path_rel
+    if not skill_path.exists():
+        return {"skill_name": Path(skill_path_rel).parent.name or "unknown", "skill_path": skill_path_rel, "prompt_chars": None}
+
+    text = skill_path.read_text(encoding="utf-8")
+    skill_name = Path(skill_path_rel).parent.name or skill_path.stem
+    # Prefer YAML frontmatter "name:" if present
+    fm = _re.match(r"^---\s*\n(.+?)\n---", text, _re.DOTALL)
+    if fm:
+        for line in fm.group(1).splitlines():
+            if line.startswith("name:"):
+                skill_name = line.split(":", 1)[1].strip().strip('"')
+                break
+
+    return {
+        "skill_name": skill_name,
+        "skill_path": skill_path_rel,
+        "prompt_chars": len(text),
+    }
 
 
 def _last_user_text(input_data: RunAgentInput) -> Optional[str]:
@@ -508,6 +670,22 @@ def _last_user_text(input_data: RunAgentInput) -> Optional[str]:
             if parts:
                 return "".join(parts)
     return None
+
+
+async def _agui_event_source(sess, prompt: str):
+    """Yield AG-UI BaseEvent objects from either an acpx Session or LangGraphSession.
+
+    For acpx Session: stream_prompt yields ACP dicts -> map_acp_event translates.
+    For LangGraphSession: stream_prompt yields BaseEvent directly.
+    """
+    if isinstance(sess, LangGraphSession):
+        async for ev in sess.stream_prompt(prompt):
+            yield ev
+    else:
+        async for rpc in sess.stream_prompt(prompt):
+            print(f"[acp] {json.dumps(rpc, default=str)[:200]}", flush=True)
+            for ev in map_acp_event(rpc):
+                yield ev
 
 
 @app.post("/agent/{name}")
@@ -545,76 +723,109 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
             thread_id=input_data.thread_id,
             run_id=input_data.run_id,
         ))
+
+        # --- Skill activation: synthetic reasoning event (works for all harnesses) ---
+        skill_info = _get_workspace_skill_info(
+            getattr(sess, "working_dir", None),
+            getattr(sess, "agent_harness", "unknown"),
+        )
+        is_first_turn = not (_load_own_history(_normalize_name(name)) or [])
+        if skill_info or sess.LLM:
+            lines = [
+                f"🎯 **Workspace:** `{Path(sess.working_dir).name if sess.working_dir else 'root'}`",
+                f"🤖 **Harness:** `{sess.agent_harness}` · **Modelo:** `{sess.LLM or '(default)'}`",
+            ]
+            if skill_info:
+                lines.append(f"📋 **Skill activo:** `{skill_info['skill_name']}`")
+                if is_first_turn and skill_info.get("prompt_chars"):
+                    lines.append(
+                        f"📂 **Cargado desde:** `{skill_info['skill_path']}` "
+                        f"({skill_info['prompt_chars']} caracteres)"
+                    )
+            # Show available tools for LangGraph sessions
+            tools_list = getattr(sess, "available_tools", None)
+            if tools_list:
+                tool_names = ", ".join(f"`{t['name']}`" for t in tools_list)
+                lines.append(f"🔧 **Tools disponibles:** {tool_names}")
+            yield encoder.encode(ReasoningMessageStartEvent(
+                messageId=reasoning_id,
+                role="reasoning",
+            ))
+            yield encoder.encode(ReasoningMessageContentEvent(
+                messageId=reasoning_id,
+                delta="\n".join(lines) + "\n\n---\n\n",
+            ))
+            reasoning_started = True
+            # Skill activation is metadata — not persisted to history
+
         try:
-            async for rpc in sess.stream_prompt(prompt):
-                print(f"[acp] {json.dumps(rpc, default=str)[:200]}", flush=True)
-                for ev in map_acp_event(rpc):
-                    # --- Reasoning (thinking) lifecycle ---
-                    # Use explicit lifecycle (no chunk transformer for reasoning)
-                    if isinstance(ev, ReasoningMessageChunkEvent):
-                        _session_status[name] = "thinking"
-                        accumulated_thinking.append(ev.delta)
-                        if not reasoning_started:
-                            yield encoder.encode(ReasoningMessageStartEvent(
-                                messageId=reasoning_id,
-                                role="reasoning",
-                            ))
-                            reasoning_started = True
-                        yield encoder.encode(ReasoningMessageContentEvent(
+            async for ev in _agui_event_source(sess, prompt):
+                # --- Reasoning (thinking) lifecycle ---
+                # Use explicit lifecycle (no chunk transformer for reasoning)
+                if isinstance(ev, ReasoningMessageChunkEvent):
+                    _session_status[name] = "thinking"
+                    accumulated_thinking.append(ev.delta)
+                    if not reasoning_started:
+                        yield encoder.encode(ReasoningMessageStartEvent(
                             messageId=reasoning_id,
-                            delta=ev.delta,
+                            role="reasoning",
                         ))
-                        continue
+                        reasoning_started = True
+                    yield encoder.encode(ReasoningMessageContentEvent(
+                        messageId=reasoning_id,
+                        delta=ev.delta,
+                    ))
+                    continue
 
-                    # --- Tool call lifecycle ---
-                    # CopilotKit's chunk transformer auto-wraps TOOL_CALL_CHUNK
-                    # with TOOL_CALL_START/ARGS/END — do NOT send explicit lifecycle events
-                    if isinstance(ev, ToolCallChunkEvent):
-                        _session_status[name] = "tool_use"
-                        tc_id = ev.tool_call_id or str(uuid.uuid4())
-                        tc_name = ev.tool_call_name or "tool"
-                        # If this ID was already used (completed and closed), assign a new unique ID
-                        if tc_id in seen_tool_call_ids and tc_id not in open_tool_calls:
-                            tc_id = f"{tc_id}_{uuid.uuid4().hex[:8]}"
-                        if tc_id not in open_tool_calls:
-                            _turn_tool_calls += 1
-                            if reasoning_started:
-                                yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
-                                reasoning_started = False
-                                reasoning_id = str(uuid.uuid4())
-                            open_tool_calls[tc_id] = tc_name
-                            seen_tool_call_ids.add(tc_id)
-                        # Ensure the chunk has toolCallId, toolCallName, and parentMessageId
-                        ev.tool_call_id = tc_id
-                        ev.tool_call_name = tc_name
-                        ev.parent_message_id = msg_id
-                        yield encoder.encode(ev)
-                        continue
-
-                    if isinstance(ev, ToolCallResultEvent):
-                        yield encoder.encode(ev)
-                        tc_id = ev.tool_call_id
-                        if tc_id and tc_id in open_tool_calls:
-                            del open_tool_calls[tc_id]
-                        continue
-
-                    # --- Text message chunks ---
-                    # The AG-UI client chunk transformer auto-wraps these
-                    # with TEXT_MESSAGE_START/CONTENT/END — do NOT send manual lifecycle events
-                    if isinstance(ev, TextMessageChunkEvent):
-                        _session_status[name] = "responding"
-                        accumulated_text.append(ev.delta)
+                # --- Tool call lifecycle ---
+                # CopilotKit's chunk transformer auto-wraps TOOL_CALL_CHUNK
+                # with TOOL_CALL_START/ARGS/END — do NOT send explicit lifecycle events
+                if isinstance(ev, ToolCallChunkEvent):
+                    _session_status[name] = "tool_use"
+                    tc_id = ev.tool_call_id or str(uuid.uuid4())
+                    tc_name = ev.tool_call_name or "tool"
+                    # If this ID was already used (completed and closed), assign a new unique ID
+                    if tc_id in seen_tool_call_ids and tc_id not in open_tool_calls:
+                        tc_id = f"{tc_id}_{uuid.uuid4().hex[:8]}"
+                    if tc_id not in open_tool_calls:
+                        _turn_tool_calls += 1
                         if reasoning_started:
                             yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
                             reasoning_started = False
                             reasoning_id = str(uuid.uuid4())
-                        ev.message_id = msg_id
-                        yield encoder.encode(ev)
-                        continue
-
-                    # Other events (CustomEvent, etc.)
-                    print(f"[run_agent] unhandled event: {ev}", flush=True)
+                        open_tool_calls[tc_id] = tc_name
+                        seen_tool_call_ids.add(tc_id)
+                    # Ensure the chunk has toolCallId, toolCallName, and parentMessageId
+                    ev.tool_call_id = tc_id
+                    ev.tool_call_name = tc_name
+                    ev.parent_message_id = msg_id
                     yield encoder.encode(ev)
+                    continue
+
+                if isinstance(ev, ToolCallResultEvent):
+                    yield encoder.encode(ev)
+                    tc_id = ev.tool_call_id
+                    if tc_id and tc_id in open_tool_calls:
+                        del open_tool_calls[tc_id]
+                    continue
+
+                # --- Text message chunks ---
+                # The AG-UI client chunk transformer auto-wraps these
+                # with TEXT_MESSAGE_START/CONTENT/END — do NOT send manual lifecycle events
+                if isinstance(ev, TextMessageChunkEvent):
+                    _session_status[name] = "responding"
+                    accumulated_text.append(ev.delta)
+                    if reasoning_started:
+                        yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
+                        reasoning_started = False
+                        reasoning_id = str(uuid.uuid4())
+                    ev.message_id = msg_id
+                    yield encoder.encode(ev)
+                    continue
+
+                # Other events (CustomEvent, etc.)
+                print(f"[run_agent] unhandled event: {ev}", flush=True)
+                yield encoder.encode(ev)
 
             # Close any open lifecycle events
             if reasoning_started:

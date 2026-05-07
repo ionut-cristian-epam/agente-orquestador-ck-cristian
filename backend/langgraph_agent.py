@@ -1,0 +1,440 @@
+"""LangGraph-based in-process agent harness.
+
+Builds a tool-using StateGraph and streams events translated to AG-UI format.
+Unlike CLI harnesses, this runs directly in the FastAPI process — no subprocess,
+no acpx, no ACP protocol.
+"""
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from typing import Annotated, AsyncIterator, TypedDict
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.tools import tool
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+
+from ag_ui.core import (
+    BaseEvent,
+    ReasoningMessageChunkEvent,
+    TextMessageChunkEvent,
+    ToolCallChunkEvent,
+    ToolCallResultEvent,
+)
+
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+class SportsAgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+def _tavily_search(query: str, max_results: int = 5) -> str:
+    """Search via Tavily API. Requires TAVILY_API_KEY."""
+    from tavily import TavilyClient
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        raise RuntimeError("TAVILY_API_KEY not set")
+    client = TavilyClient(api_key=api_key)
+    response = client.search(query=query, max_results=max_results)
+    results = response.get("results", [])
+    if not results:
+        return "No results found."
+    formatted = []
+    for r in results:
+        formatted.append(
+            f"- **{r.get('title', 'Untitled')}**\n  {r.get('content', '')[:300]}\n  Source: {r.get('url', '')}"
+        )
+    return "\n\n".join(formatted)
+
+
+def _ddg_search(query: str, max_results: int = 5) -> str:
+    """Fallback search via DuckDuckGo (no API key required)."""
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return "Search unavailable: no Tavily key and ddgs package missing."
+    with DDGS() as ddg:
+        results = list(ddg.text(query, max_results=max_results))
+    if not results:
+        return "No results found."
+    formatted = []
+    for r in results:
+        formatted.append(
+            f"- **{r.get('title', 'Untitled')}**\n  {r.get('body', '')[:300]}\n  Source: {r.get('href', '')}"
+        )
+    return "\n\n".join(formatted)
+
+
+def _do_search(query: str) -> str:
+    """Use Tavily if key is set, otherwise DuckDuckGo."""
+    if os.environ.get("TAVILY_API_KEY"):
+        try:
+            return _tavily_search(query)
+        except Exception as e:
+            print(f"[langgraph] Tavily failed: {e}, falling back to DuckDuckGo", flush=True)
+    return _ddg_search(query)
+
+
+@tool
+def web_search(query: str) -> str:
+    """Search the web for information. Use for current events, news, or facts you don't know.
+
+    Args:
+        query: The search query.
+
+    Returns:
+        Top search results with titles, snippets, and source URLs.
+    """
+    return _do_search(query)
+
+
+@tool
+def get_sport_rules(sport_name: str) -> str:
+    """Search for the official rules of a specific sport.
+
+    Use this when the user asks specifically about how a sport is played,
+    its rules, fouls, scoring system, or regulations.
+
+    Args:
+        sport_name: Name of the sport (e.g. "cricket", "rugby", "padel").
+
+    Returns:
+        Search results focused on official rules of the sport.
+    """
+    query = f"official rules of {sport_name} how to play scoring fouls"
+    return _do_search(query)
+
+
+SPORTS_TOOLS = [web_search, get_sport_rules]
+
+
+# ---------------------------------------------------------------------------
+# Model factory
+# ---------------------------------------------------------------------------
+
+def _create_chat_model(model_name: str):
+    """Build a langchain ChatModel from a 'provider/model' string.
+
+    Validates that the matching API key environment variable is set.
+
+    Supported providers:
+      Paid:  openai, anthropic, google
+      Free:  groq, nagaai, openrouter, cerebras
+             (all OpenAI-compatible endpoints; require their respective API keys)
+    """
+    if "/" not in model_name:
+        raise ValueError(f"Invalid model name '{model_name}': expected 'provider/model_id'")
+
+    provider, model_id = model_name.split("/", 1)
+    provider = provider.lower()
+
+    if provider == "openai":
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise RuntimeError("OPENAI_API_KEY not set in environment")
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(model=model_id, streaming=True)
+
+    if provider == "anthropic":
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError("ANTHROPIC_API_KEY not set in environment")
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(model_name=model_id, streaming=True)
+
+    if provider == "google":
+        if not os.environ.get("GOOGLE_API_KEY"):
+            raise RuntimeError("GOOGLE_API_KEY not set in environment")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(model=model_id)
+
+    # --- Free / OpenAI-compatible relays ---
+
+    if provider == "groq":
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            raise RuntimeError("GROQ_API_KEY not set in environment")
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model_id,
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1",
+            streaming=True,
+        )
+
+    if provider == "nagaai":
+        api_key = os.environ.get("NAGA_API_KEY")
+        if not api_key:
+            raise RuntimeError("NAGA_API_KEY not set in environment")
+        from langchain_openai import ChatOpenAI
+        # NagaAI model IDs may include path segments (e.g. "meta/llama-3.3-70b").
+        # The provider prefix is stripped; the rest is passed verbatim.
+        return ChatOpenAI(
+            model=model_id,
+            api_key=api_key,
+            base_url="https://api.naga.ac/v1",
+            streaming=True,
+        )
+
+    if provider == "openrouter":
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY not set in environment")
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model_id,
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            streaming=True,
+        )
+
+    if provider == "cerebras":
+        api_key = os.environ.get("CEREBRAS_API_KEY")
+        if not api_key:
+            raise RuntimeError("CEREBRAS_API_KEY not set in environment")
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model_id,
+            api_key=api_key,
+            base_url="https://api.cerebras.ai/v1",
+            streaming=True,
+        )
+
+    raise ValueError(f"Unknown provider '{provider}' in model '{model_name}'")
+
+
+# ---------------------------------------------------------------------------
+# Graph builder
+# ---------------------------------------------------------------------------
+
+def build_sports_agent(model_name: str, system_prompt: str):
+    """Build a compiled StateGraph for the sports expert agent.
+
+    Architecture:
+      START -> agent (LLM with tools bound)
+      agent --[tool_calls?]--> tools (ToolNode) -> agent
+      agent --[no tool_calls]--> END
+    """
+    base_llm = _create_chat_model(model_name)
+    llm = base_llm.bind_tools(SPORTS_TOOLS)
+    tool_names = [t.name for t in SPORTS_TOOLS]
+    print(f"[langgraph] Graph built — model={model_name!r} tools={tool_names}", flush=True)
+
+    def agent_node(state: SportsAgentState) -> dict:
+        messages = state["messages"]
+        if not messages or not isinstance(messages[0], SystemMessage):
+            messages = [SystemMessage(content=system_prompt)] + list(messages)
+        try:
+            response = llm.invoke(messages)
+        except Exception as e:
+            # Some providers (notably Groq with llama-3.3) occasionally
+            # generate malformed tool_call JSON, which surfaces as an
+            # openai.APIError "Failed to call a function". Retry once
+            # without tools so the user still receives a response.
+            err_str = str(e)
+            if "function" in err_str.lower() or "tool" in err_str.lower():
+                print(f"[langgraph] tool_call failure ({type(e).__name__}: {err_str[:200]}); retrying without tools", flush=True)
+                response = base_llm.invoke(messages)
+            else:
+                raise
+        return {"messages": [response]}
+
+    def should_continue(state: SportsAgentState) -> str:
+        last = state["messages"][-1]
+        if isinstance(last, AIMessage) and last.tool_calls:
+            return "tools"
+        return END
+
+    graph = StateGraph(SportsAgentState)
+    graph.add_node("agent", agent_node)
+    graph.add_node("tools", ToolNode(SPORTS_TOOLS))
+    graph.set_entry_point("agent")
+    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_edge("tools", "agent")
+    return graph.compile()
+
+
+# ---------------------------------------------------------------------------
+# Event streaming: LangGraph events -> AG-UI events
+# ---------------------------------------------------------------------------
+
+def _extract_text_from_chunk(chunk: AIMessageChunk) -> str:
+    """Pull plain text from an AIMessageChunk. Handles list-of-blocks for Anthropic."""
+    content = chunk.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return ""
+
+
+def _extract_thinking_from_chunk(chunk: AIMessageChunk) -> str:
+    """Pull native thinking/reasoning content from an AIMessageChunk.
+
+    Currently only Anthropic Claude with extended_thinking emits thinking blocks
+    in the list-of-blocks content format.
+    """
+    content = chunk.content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "thinking":
+                    parts.append(block.get("thinking", ""))
+                elif btype == "redacted_thinking":
+                    parts.append("[redacted thinking]")
+        return "".join(parts)
+    return ""
+
+
+async def stream_langgraph_events(
+    graph,
+    messages: list[BaseMessage],
+    *,
+    msg_id_seed: str | None = None,
+    message_collector: list | None = None,
+    expose_reasoning: bool = True,
+) -> AsyncIterator[BaseEvent]:
+    """Invoke the graph with the given messages and yield AG-UI events.
+
+    Translation rules:
+      on_chat_model_stream (text content)     -> TextMessageChunkEvent
+      on_chat_model_stream (thinking content) -> ReasoningMessageChunkEvent
+      on_chat_model_end (tool_calls)          -> ReasoningMessageChunkEvent (synthetic)
+                                              + ToolCallChunkEvent
+      on_tool_end                             -> ReasoningMessageChunkEvent (synthetic)
+                                              + ToolCallResultEvent
+
+    If `expose_reasoning` is True (default), synthetic ReasoningMessageChunkEvents
+    are inserted before tool calls and after tool results to make the agent's
+    chain-of-thought visible to the user.
+
+    If message_collector is provided, the full AIMessage/ToolMessage objects
+    produced by the graph are appended to it in execution order.
+    """
+    msg_id = msg_id_seed or str(uuid.uuid4())
+    emitted_tool_call_ids: set[str] = set()
+    # Track whether we have emitted any text chunk during this run.
+    # Some providers (e.g. Groq via OpenAI-compat) sometimes deliver the
+    # response in one bulk piece via on_chat_model_end without firing
+    # on_chat_model_stream. In that case we emit a synthetic chunk so the
+    # frontend still receives the assistant text.
+    text_emitted = False
+
+    async for event in graph.astream_events(
+        {"messages": messages},
+        version="v2",
+    ):
+        kind = event.get("event")
+        data = event.get("data", {})
+
+        if kind == "on_chat_model_stream":
+            chunk = data.get("chunk")
+            if chunk is None:
+                print("[langgraph] stream chunk=None", flush=True)
+                continue
+            # Native thinking blocks (Anthropic extended thinking)
+            thinking = _extract_thinking_from_chunk(chunk)
+            text = _extract_text_from_chunk(chunk)
+            print(f"[langgraph] stream chunk text_len={len(text)} thinking_len={len(thinking)} content_type={type(chunk.content).__name__}", flush=True)
+            if thinking:
+                yield ReasoningMessageChunkEvent(delta=thinking)
+            if text:
+                text_emitted = True
+                yield TextMessageChunkEvent(
+                    message_id=msg_id,
+                    role="assistant",
+                    delta=text,
+                )
+            continue
+
+        if kind == "on_chat_model_end":
+            output = data.get("output")
+            if isinstance(output, AIMessage):
+                if message_collector is not None:
+                    message_collector.append(output)
+                print(f"[langgraph] on_chat_model_end: tool_calls={len(output.tool_calls or [])} text_len={len(output.content) if isinstance(output.content, str) else 'list'} text_emitted={text_emitted}", flush=True)
+                # Fallback: if no streaming chunks delivered text but the final
+                # message has text content, emit it as a synthetic chunk.
+                if not text_emitted and not output.tool_calls:
+                    final_text = output.content if isinstance(output.content, str) else ""
+                    if not final_text and isinstance(output.content, list):
+                        # Anthropic-style list of blocks
+                        parts = []
+                        for block in output.content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                parts.append(block.get("text", ""))
+                        final_text = "".join(parts)
+                    if final_text:
+                        text_emitted = True
+                        yield TextMessageChunkEvent(
+                            message_id=msg_id,
+                            role="assistant",
+                            delta=final_text,
+                        )
+                if output.tool_calls:
+                    for tc in output.tool_calls:
+                        tc_id = tc.get("id") or str(uuid.uuid4())
+                        if tc_id in emitted_tool_call_ids:
+                            continue
+                        emitted_tool_call_ids.add(tc_id)
+                        tc_name = tc.get("name", "tool")
+                        args_json = json.dumps(tc.get("args", {}), ensure_ascii=False)
+                        if expose_reasoning:
+                            args_preview = args_json if len(args_json) <= 200 else args_json[:197] + "..."
+                            yield ReasoningMessageChunkEvent(
+                                delta=f"🔧 Llamando a `{tc_name}` con argumentos: `{args_preview}`\n\n",
+                            )
+                        yield ToolCallChunkEvent(
+                            tool_call_id=tc_id,
+                            tool_call_name=tc_name,
+                            delta=args_json,
+                        )
+            continue
+
+        if kind == "on_tool_end":
+            output = data.get("output")
+            if isinstance(output, ToolMessage):
+                if message_collector is not None:
+                    message_collector.append(output)
+                content = output.content
+                if not isinstance(content, str):
+                    content = json.dumps(content, ensure_ascii=False, default=str)
+                print(f"[langgraph] on_tool_end: tool_call_id={output.tool_call_id} result_len={len(content)}", flush=True)
+                if expose_reasoning:
+                    yield ReasoningMessageChunkEvent(
+                        delta=f"✅ Recibido resultado ({len(content)} caracteres). Procesando para componer respuesta...\n\n",
+                    )
+                yield ToolCallResultEvent(
+                    message_id=output.tool_call_id or str(uuid.uuid4()),
+                    tool_call_id=output.tool_call_id or "",
+                    content=content,
+                    role="tool",
+                )
+            continue

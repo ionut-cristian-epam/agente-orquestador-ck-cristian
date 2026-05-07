@@ -1,0 +1,6 @@
+{
+  "type": "langgraph",
+  "default_model": "openai/gpt-4o-mini",
+  "system_prompt_file": "skills/sports-expert/SKILL.md",
+  "description": "Agente experto en deportes — reglas, historia, estrategia y eventos actuales de cualquier deporte"
+}

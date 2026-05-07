@@ -434,3 +434,5 @@ class TestGetModels:
         data = res.json()
         assert data["groups"] == {}
         assert data["default"] == ""
+
+
