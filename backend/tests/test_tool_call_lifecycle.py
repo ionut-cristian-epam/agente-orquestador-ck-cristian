@@ -200,8 +200,8 @@ class TestToolCallLifecycle:
         assert "RUN_ERROR" in types
         assert "RUN_ERROR" in types
 
-    def test_reasoning_closed_before_tool_call(self):
-        """If reasoning is active when tool call arrives, reasoning ends first."""
+    def test_reasoning_stays_open_through_tool_call(self):
+        """Reasoning stays open through tool calls — single thinking box."""
         sess = _mock_session("sess")
 
         async def fake_stream(_prompt):
@@ -217,10 +217,12 @@ class TestToolCallLifecycle:
         events = _parse_sse_events(res.text)
         types = _event_types(events)
 
-        # Reasoning END should come before TOOL_CALL_CHUNK
+        assert "REASONING_MESSAGE_START" in types
+        assert "TOOL_CALL_CHUNK" in types
+        # Reasoning END comes after tool call (at stream end), not before
         reasoning_end_idx = types.index("REASONING_MESSAGE_END")
         tool_chunk_idx = types.index("TOOL_CALL_CHUNK")
-        assert reasoning_end_idx < tool_chunk_idx
+        assert reasoning_end_idx > tool_chunk_idx
 
     def test_status_changes_to_tool_use_during_tool_call(self):
         sess = _mock_session("sess")

@@ -28,9 +28,13 @@ Framework React de código abierto para construir interfaces de chat con agentes
 
 Agente de codificación open-source y multi-provider. Es el harness por defecto del orquestador. Soporta múltiples proveedores de LLM (NagaAI, OpenCode Zen, Amazon Bedrock) configurables via `opencode.json`. Se ejecuta a través de `acpx opencode`. [npm](https://www.npmjs.com/package/opencode-ai)
 
+### LangGraph
+
+Framework de LangChain para construir agentes como grafos de estado. Cada nodo es una función que transforma el estado, y las aristas definen el flujo (condicional o fijo). En este proyecto, el harness `langgraph` usa un `StateGraph` con loop agente: `agent_node` (LLM con tools) → `should_continue` → `ToolNode` → `agent_node`. Soporta streaming de eventos via `astream_events(version="v2")`. [Web](https://langchain-ai.github.io/langgraph/)
+
 ### FastAPI
 
-Framework web Python de alto rendimiento para construir APIs. En este proyecto, sirve como puente entre el protocolo AG-UI (que espera el frontend CopilotKit) y el protocolo ACP (que hablan los agentes via acpx). Gestiona sesiones, traduce eventos y emite SSE. [Web](https://fastapi.tiangolo.com)
+Framework web Python de alto rendimiento para construir APIs. En este proyecto, sirve como puente entre el protocolo AG-UI (que espera el frontend CopilotKit) y los agentes (CLI via acpx, LangGraph directo en Python). Gestiona sesiones, traduce eventos, emite SSE de chat y SSE push de estado/métricas. [Web](https://fastapi.tiangolo.com)
 
 ### Next.js
 
@@ -82,31 +86,22 @@ Agente CLI:         Prompt → LLM → "Necesito leer main.py"
                                   → "Bug corregido. Esto es lo que hice: ..."
 ```
 
-### Por qué Agentes CLI y no un Framework de Agentes
+### CLI Agents vs Framework Agents
 
-Este proyecto **no usa LangChain, LangGraph, CrewAI, Google ADK, AutoGen, ni ningún framework de creación de agentes**. La razón: no necesita construir agentes, solo orquestarlos.
+El proyecto soporta **dos modelos de agente**:
 
-```
-Frameworks de agentes (LangGraph, CrewAI, ADK...):
-  → TÚ defines: tools, prompts, estado, memoria, routing
-  → El agente VIVE dentro de tu código
-  → Necesitas meses para igualar un producto maduro
+1. **CLI agents** (OpenCode, Claude, Codex...): agentes ya construidos, completos y autosuficientes. Se orquestan via `acpx` (ACP). Ideales para tareas de codificación.
+2. **Framework agents** (LangGraph): agentes custom construidos en Python con tools propias. Corren directo en el backend (sin subprocess, sin acpx). Ideales para dominios no-código o tools custom.
 
-Este proyecto:
-  → Solo: elige qué CLI lanzar, configura modelo, pasa prompt, traduce eventos
-  → El agente VIVE fuera, como producto ya terminado
-  → Los agentes ya tienen miles de horas de ingeniería
-```
-
-| Aspecto | Framework (ej. LangGraph) | Este proyecto (CLI agents) |
-|---------|--------------------------|---------------------------|
-| Define tools | Tú en Python | Ya built-in en el CLI |
-| Define loop agente | Tú diseñas el grafo | Ya implementado en el CLI |
-| Conecta al LLM | Tú via LangChain | Tú via opencode.json |
-| System prompt | Tú en código | Via skills (.md) en config |
-| Tiempo hasta funcionar | Horas/días | `npm install` y funciona |
-| Personalización | Total | Limitada (skills, config, plugins) |
-| Dominio | Cualquiera | Codificación |
+| Aspecto | CLI agents (opencode, claude...) | Framework (LangGraph) |
+|---------|----------------------------------|----------------------|
+| Define tools | Ya built-in en el CLI | Tú en Python |
+| Define loop agente | Ya implementado en el CLI | Tú diseñas el grafo |
+| Conecta al LLM | Via opencode.json | Via LangChain/LangGraph |
+| System prompt | Via skills (.md) en config | Via skills (.md) o código |
+| Comunicación | ACP (stdin/stdout → acpx) | Python directo → AG-UI |
+| Personalización | Limitada (skills, config, plugins) | Total |
+| Dominio | Codificación | Cualquiera |
 
 ### Qué controla el Orquestador vs Qué controla el Agente
 
@@ -138,26 +133,37 @@ Skills = ESTRATEGIAS de razonamiento (cómo usar esas tools). Las defines tú en
 | **Testeables** | Internamente por el CLI | No directamente |
 | **Dónde están** | Dentro del binario del CLI | `agents/{workspace}/.opencode/skills/` |
 
-### Comunicación Backend ↔ Agente
+### Comunicación Backend ↔ Agentes
 
-El backend nunca habla directamente con LLMs. Todo pasa por `acpx` como intermediario:
+El backend gestiona dos tipos de agentes con comunicaciones distintas:
 
 ```
-Frontend ──AG-UI/SSE──► Backend (FastAPI) ──ACP/stdin/stdout──► acpx ──► Agente CLI
-                                                                              │
-                                                                              ▼
-                                                                         LLM Provider
-                                                                    (NagaAI, Bedrock, etc.)
+                                   ┌──ACP/stdin/stdout──► acpx ──► Agente CLI
+Frontend ──AG-UI/SSE──► Backend ───┤                                    │
+         ──SSE push───►  (FastAPI) │                                    ▼
+         ──REST──────►             │                              LLM Provider
+                                   └──Python directo──► LangGraph agent
+                                                              │
+                                                              ▼
+                                                        LLM Provider (Groq)
 ```
 
-Hay dos protocolos distintos en capas diferentes:
+Tres interfaces limpias entre frontend y backend:
 
-| Protocolo | Dónde | Dirección | Formato |
-|-----------|-------|-----------|---------|
-| **AG-UI** | Frontend ↔ Backend | SSE (Server-Sent Events) via HTTP | Eventos tipados (RunStarted, TextMessageChunk, ToolCallChunk...) |
-| **ACP** | Backend ↔ acpx ↔ Agente | JSON-RPC via stdin/stdout (subprocess) | Notificaciones NDJSON (agent_message_chunk, tool_call...) |
+| Interfaz | Dirección | Propósito |
+|----------|-----------|-----------|
+| **AG-UI SSE** | `POST /agent/{name}` → SSE stream | Chat streaming (protocolo AG-UI) |
+| **SSE push** | `GET /sessions/subscribe` → SSE stream | Estado y métricas en tiempo real |
+| **REST** | `GET/POST/DELETE /sessions/*` | CRUD, lifecycle, historial |
 
-El traductor `acp_to_agui.py` convierte eventos ACP en eventos AG-UI. El frontend nunca ve ACP; el agente nunca ve AG-UI.
+Protocolos internos (backend ↔ agentes):
+
+| Protocolo | Dónde | Formato |
+|-----------|-------|---------|
+| **ACP** | Backend ↔ acpx ↔ CLI agent | JSON-RPC via stdin/stdout (subprocess) |
+| **Python directo** | Backend ↔ LangGraph agent | Eventos AG-UI nativos (sin traducción) |
+
+El traductor `acp_to_agui.py` convierte eventos ACP en eventos AG-UI para CLI agents. LangGraph emite AG-UI directamente. El frontend solo ve AG-UI — nunca ACP.
 
 ### Caso de ejemplo: OpenCode
 
@@ -181,18 +187,31 @@ Cuando el orquestador lanza OpenCode en el workspace "debugging":
    e. Responde al usuario con resumen
 ```
 
-### Extensibilidad: Agentes Framework como Harness Adicional
+### Harness LangGraph: Agente Framework Integrado
 
-La arquitectura soporta añadir agentes basados en frameworks (LangGraph, Google ADK, CrewAI) como harnesses adicionales, sin reemplazar los CLI existentes:
+El harness `langgraph` es un agente custom construido con LangGraph que corre directo en Python, sin subprocess ni acpx:
 
 ```
-harness="opencode"    → subprocess → acpx → OpenCode CLI    (existente, sin cambios)
-harness="claude"      → subprocess → acpx → Claude CLI      (existente, sin cambios)
-harness="langgraph"   → Python directo → LangGraph agent    (futuro, coexiste)
-harness="adk"         → Python directo → Google ADK agent   (futuro, coexiste)
+harness="opencode"    → subprocess → acpx → OpenCode CLI    (CLI agent)
+harness="claude"      → subprocess → acpx → Claude CLI      (CLI agent)
+harness="langgraph"   → Python directo → LangGraph agent    (framework agent, integrado)
 ```
 
-Un agente framework correría directo en Python (sin subprocess, sin acpx, sin traducción ACP→AG-UI) y emitiría eventos AG-UI directamente. Sería más rápido y permitiría tools custom (APIs internas, bases de datos, etc.), pero requiere construir el agente desde cero.
+**Arquitectura del agente LangGraph:**
+
+```
+START → agent_node (LLM + tools bound)
+          │
+          ├── tool_calls? → ToolNode (ejecuta tools) → agent_node (loop)
+          └── no tool_calls → END
+```
+
+- **Modelo**: Groq (`llama-3.3-70b-versatile`) por defecto via `langchain-groq`
+- **Tools**: `web_search` (búsqueda web via Tavily), `get_sport_rules` (reglas deportivas)
+- **System prompt**: Configurable via `langgraph_agent.json` → `system_prompt_file` (skills `.md`)
+- **Streaming**: Emite eventos AG-UI directamente (`TextMessageChunkEvent`, `ReasoningMessageChunkEvent`, `ToolCallChunkEvent`, `ToolCallResultEvent`)
+- **Resiliencia**: Reintento automático en errores de tool call (2 intentos con tools → fallback sin tools)
+- **Thinking unificado**: Tool calls agrupados en un solo cuadro de pensamiento (llamada + resultado + procesamiento)
 
 | Necesidad | CLI agents basta? | Framework necesario? |
 |-----------|-------------------|---------------------|
@@ -218,29 +237,34 @@ Un agente framework correría directo en Python (sin subprocess, sin acpx, sin t
 │       │              │              │                            │
 │  CopilotKitProvider + HttpAgent (AG-UI)                         │
 │       │              │              │                            │
+│  EventSource (SSE push: estado + métricas)                      │
+│                                                                 │
 └───────┼──────────────┼──────────────┼───────────────────────────┘
-        │ SSE          │ SSE          │ SSE
+        │ AG-UI SSE    │ AG-UI SSE    │ AG-UI SSE
         ▼              ▼              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    BACKEND (FastAPI + Python)                    │
 │                                                                 │
-│  POST /agent/{name}       ← Endpoint AG-UI (streaming SSE)     │
-│  GET  /sessions           ← Listar sesiones (local + acpx)     │
-│  POST /sessions           ← Crear nueva sesión                 │
-│  DELETE /sessions/{n}     ← Cerrar sesión                      │
-│  GET /sessions/status     ← Estado de actividad por sesión     │
-│  GET /sessions/metrics    ← Métricas por sesión                │
-│  GET /sessions/{n}/history← Historial de conversación          │
-│  POST /sessions/{n}/reconnect ← Reconectar sesión caída       │
-│  GET /workspaces          ← Workspaces de agentes con skills   │
-│  GET /models/{harness}    ← Modelos disponibles por harness    │
+│  --- AG-UI (chat streaming) ---                                 │
+│  POST /agent/{name}           ← Streaming SSE de conversación  │
 │                                                                 │
-│  agui_server.py ──→ launch_sessions.py ──→ acpx CLI            │
-│       │                                       │                 │
-│  acp_to_agui.py                               │                 │
-│  (traduce ACP → AG-UI)                        ▼                 │
-│                                          Agente (opencode,     │
-│                                          claude, codex, etc.)  │
+│  --- SSE push (tiempo real) ---                                 │
+│  GET /sessions/subscribe      ← Estado + métricas push (SSE)   │
+│                                                                 │
+│  --- REST (CRUD + lifecycle) ---                                │
+│  GET  /sessions               ← Listar sesiones                │
+│  POST /sessions               ← Crear nueva sesión             │
+│  DELETE /sessions/{n}         ← Cerrar sesión                  │
+│  GET /sessions/{n}/history    ← Historial de conversación      │
+│  POST /sessions/{n}/reconnect ← Reconectar sesión (manual)     │
+│  GET /workspaces              ← Workspaces con skills          │
+│  GET /models/{harness}        ← Modelos disponibles            │
+│                                                                 │
+│  agui_server.py ─┬─→ launch_sessions.py ──→ acpx ──→ CLI agent│
+│       │          └─→ langgraph_session.py ──→ LangGraph agent  │
+│       │                                                         │
+│  acp_to_agui.py (traduce ACP → AG-UI, solo CLI agents)        │
+│  auto-reconnect (backend-driven, exponential backoff)          │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -249,11 +273,11 @@ Un agente framework correría directo en Python (sin subprocess, sin acpx, sin t
 1. **Usuario** escribe un mensaje en un `ChatPanel` del frontend
 2. **CopilotKit** envía un `POST /agent/{nombre}` al backend via `HttpAgent` (protocolo AG-UI)
 3. **`agui_server.py`** extrae el texto del usuario y llama a `session.stream_prompt()`
-4. **`launch_sessions.py`** ejecuta `acpx --format json {harness} -s {nombre} -f -` pasando el prompt por stdin
-5. **`acpx`** envía el prompt al agente (opencode, claude, etc.) y retransmite eventos ACP como NDJSON por stdout
-6. **`acp_to_agui.py`** traduce cada evento ACP (`agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`) a eventos AG-UI (`TextMessageChunkEvent`, `ReasoningMessageChunkEvent`, `ToolCallChunkEvent`, etc.)
-7. **`agui_server.py`** gestiona el ciclo de vida de los eventos (start/content/end para reasoning y tool calls) y los envía como SSE al frontend
-8. **CopilotKit** renderiza los mensajes, el pensamiento del agente y las tool calls en el chat
+4. **Según el harness:**
+   - **CLI agents** (opencode, claude...): `launch_sessions.py` ejecuta `acpx` → prompt por stdin → eventos ACP por stdout → `acp_to_agui.py` traduce a AG-UI
+   - **LangGraph**: `langgraph_session.py` invoca el grafo LangGraph directo en Python → emite eventos AG-UI nativos (sin traducción)
+5. **`agui_server.py`** gestiona el ciclo de vida de los eventos (start/content/end para reasoning y tool calls) y los envía como SSE al frontend
+6. **CopilotKit** renderiza los mensajes, el pensamiento del agente y las tool calls en el chat
 
 ---
 
@@ -393,12 +417,14 @@ agent-harness-orchestrator/
 │   ├── agui_server.py          # Servidor FastAPI: endpoints AG-UI, gestión de sesiones
 │   ├── launch_sessions.py      # Clase Session: crear/prompt/stream/cerrar via acpx
 │   ├── acp_to_agui.py          # Traductor ACP JSON-RPC → eventos AG-UI
+│   ├── langgraph_agent.py      # Agente LangGraph: tools, modelo, grafo, streaming AG-UI
+│   ├── langgraph_session.py    # Sesión LangGraph: historial, lazy graph build, skills
 │   ├── available_models.py     # Listas de modelos soportados (OpenCode + Copilot CLI)
 │   ├── remove_session.py       # Utilidad de limpieza de sesiones
 │   ├── requirements.txt        # Dependencias Python
 │   ├── Dockerfile              # Imagen Docker del backend
 │   ├── pytest.ini              # Configuración pytest
-│   └── tests/                  # Tests unitarios (8 archivos, 70+ tests)
+│   └── tests/                  # Tests unitarios (10 archivos, 154 tests)
 │       ├── test_acp_to_agui.py
 │       ├── test_agui_server.py
 │       ├── test_session.py
@@ -406,7 +432,9 @@ agent-harness-orchestrator/
 │       ├── test_utf8_encoding.py
 │       ├── test_history_persistence.py
 │       ├── test_reconnect_timeout.py
-│       └── test_tool_call_lifecycle.py
+│       ├── test_tool_call_lifecycle.py
+│       ├── test_langgraph_agent.py
+│       └── test_langgraph_session.py
 ├── frontend/
 │   ├── app/
 │   │   ├── page.tsx            # Home: layout multi-panel, polling de estado, broadcast
@@ -430,13 +458,18 @@ agent-harness-orchestrator/
 │   │   └── .opencode/skills/
 │   │       └── systematic-debugging/
 │   │           └── SKILL.md        # Skill de debugging sistemático
-│   └── documentation/
-│       ├── opencode.json           # Config: modelo, provider, instrucciones
-│       └── .opencode/skills/
-│           └── ddf/
-│               ├── SKILL.md            # Skill de documentación funcional (DDF)
-│               ├── references/         # Templates y checklists de calidad
-│               └── section-generators/ # Generadores por sección (12 secciones)
+│   ├── documentation/
+│   │   ├── opencode.json           # Config: modelo, provider, instrucciones
+│   │   └── .opencode/skills/
+│   │       └── ddf/
+│   │           ├── SKILL.md            # Skill de documentación funcional (DDF)
+│   │           ├── references/         # Templates y checklists de calidad
+│   │           └── section-generators/ # Generadores por sección (12 secciones)
+│   └── sports/
+│       ├── langgraph_agent.json    # Config LangGraph: modelo, system_prompt_file
+│       ├── opencode.json           # Config OpenCode (alternativa)
+│       └── skills/sports-expert/
+│           └── SKILL.md            # Skill de experto deportivo
 ├── sessions/                   # Índice local de sesiones
 │   ├── index.json              # Metadata de sesiones (nombre, harness, modelo, fechas)
 │   └── history/                # Historial propio de conversaciones (preserva formato markdown)
@@ -457,8 +490,8 @@ Ejecutar múltiples agentes en paralelo, cada uno con su modelo, directorio de t
 ### 100+ Modelos Soportados
 AWS Bedrock (Claude, Llama, Mistral, Qwen, DeepSeek, Nova, ...), NagaAI (7 modelos gratuitos) y OpenCode Zen (6 modelos gratuitos).
 
-### 16 Harnesses de Agente
-OpenCode, Claude Code, Codex, Gemini, Cursor, Copilot, Kiro, Qwen, Kimi, Kilocode, iFlow, Droid, OpenClaw, Pi, Qoder, Trae.
+### 17 Harnesses de Agente
+OpenCode, Claude Code, Codex, Gemini, Cursor, Copilot, Kiro, Qwen, Kimi, Kilocode, iFlow, Droid, OpenClaw, Pi, Qoder, Trae (CLI agents via acpx) + LangGraph (framework agent, Python directo).
 
 ### Workspaces de Agentes con Skills
 Directorios especializados en `agents/` con su propio `opencode.json`, modelos y skills. El backend auto-descubre workspaces via `GET /workspaces` y expone los skills disponibles (parseados desde YAML frontmatter en archivos `.md`). Actualmente existen:
@@ -474,14 +507,14 @@ Abrir múltiples chats lado a lado en el navegador. Componentes modulares: `Chat
 ### Broadcast
 Enviar el mismo prompt a todas las sesiones abiertas simultáneamente. Formulario muestra conteo de paneles activos y estado de envío.
 
-### Estado en Tiempo Real
-Indicadores visuales por sesión: `idle`, `thinking`, `tool_use`, `responding`. Polling cada 1.5 segundos.
+### Estado en Tiempo Real (SSE Push)
+Indicadores visuales por sesión: `idle`, `thinking`, `tool_use`, `responding`. El backend envía actualizaciones via SSE push (`GET /sessions/subscribe`) — sin polling. El frontend abre una conexión EventSource y recibe estado + métricas instantáneamente cuando cambian.
 
-### Health Check y Reconexión
-Cada sesión reporta su salud: `connected`, `disconnected`, `reconnecting`. Endpoint `POST /sessions/{name}/reconnect` para reconectar sesiones caídas con cooldown de 10 segundos. Indicadores visuales en la UI.
+### Health Check y Reconexión Automática
+Cada sesión reporta su salud: `connected`, `disconnected`, `reconnecting`. El backend gestiona la reconexión automática con exponential backoff (3 intentos, 5s/10s/15s) para CLI agents. Botón manual `POST /sessions/{name}/reconnect` como fallback. Indicadores visuales en la UI.
 
 ### Métricas por Sesión
-Endpoint `GET /sessions/metrics` con estadísticas por sesión: turnos, caracteres de texto/thinking, tool calls totales, tiempos de respuesta (total, promedio, último), métricas del último turno.
+Estadísticas por sesión enviadas via SSE push: turnos, caracteres de texto/thinking, tool calls totales, tiempos de respuesta (total, promedio, último), métricas del último turno.
 
 ### Persistencia de Mensajes
 Historial de chat guardado en `sessions/history/` con formato markdown preservado (saltos de línea, listas, código). Se restaura al recargar la página. Fallback a historial de acpx si no existe historial propio.
@@ -506,6 +539,8 @@ Modo claro/oscuro con toggle. 6 colores de acento seleccionables (Blue, Violet, 
 Para modelos de AWS Bedrock, configurar credenciales AWS (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`).
 
 Para modelos NagaAI (gratis), configurar `NAGA_API_KEY`.
+
+Para el harness LangGraph con Groq, configurar `GROQ_API_KEY`. Para la tool `web_search`, configurar `TAVILY_API_KEY`.
 
 ---
 
@@ -576,18 +611,17 @@ session.close_session()
 
 ## API del Backend
 
-| Método | Endpoint | Descripción |
-|--------|----------|-------------|
-| `GET` | `/sessions` | Listar sesiones (locales + acpx) |
-| `POST` | `/sessions` | Crear nueva sesión |
-| `DELETE` | `/sessions/{nombre}` | Cerrar y eliminar sesión |
-| `GET` | `/sessions/{nombre}/history` | Historial de conversación (con formato preservado) |
-| `GET` | `/sessions/status` | Estado de actividad y salud de cada sesión |
-| `GET` | `/sessions/metrics` | Métricas de rendimiento por sesión |
-| `POST` | `/sessions/{nombre}/reconnect` | Reconectar sesión desconectada |
-| `GET` | `/workspaces` | Auto-descubrir workspaces de agentes con skills |
-| `GET` | `/models/{harness}` | Modelos disponibles para un harness |
-| `POST` | `/agent/{nombre}` | Endpoint AG-UI — streaming SSE de conversación |
+| Método | Endpoint | Tipo | Descripción |
+|--------|----------|------|-------------|
+| `POST` | `/agent/{nombre}` | AG-UI SSE | Streaming de conversación (protocolo AG-UI) |
+| `GET` | `/sessions/subscribe` | SSE push | Estado + métricas en tiempo real |
+| `GET` | `/sessions` | REST | Listar sesiones (locales + acpx) |
+| `POST` | `/sessions` | REST | Crear nueva sesión |
+| `DELETE` | `/sessions/{nombre}` | REST | Cerrar y eliminar sesión |
+| `GET` | `/sessions/{nombre}/history` | REST | Historial de conversación (formato preservado) |
+| `POST` | `/sessions/{nombre}/reconnect` | REST | Reconectar sesión desconectada (manual) |
+| `GET` | `/workspaces` | REST | Auto-descubrir workspaces de agentes con skills |
+| `GET` | `/models/{harness}` | REST | Modelos disponibles para un harness |
 
 ### Crear sesión (POST /sessions)
 
@@ -625,7 +659,7 @@ session.close_session()
 
 | Componente | Archivo | Descripción |
 |------------|---------|-------------|
-| **Home** | `page.tsx` | Layout principal: multi-panel + sidebar, polling de estado, gestión de agentes HttpAgent |
+| **Home** | `page.tsx` | Layout principal: multi-panel + sidebar, SSE push de estado, gestión de agentes HttpAgent |
 | **ChatPanel** | `components/ChatPanel.tsx` | Panel de chat individual con CopilotKit, carga de historial, recepción de broadcast |
 | **Sidebar** | `components/Sidebar.tsx` | Sidebar colapsable: lista de sesiones, creación/eliminación, tema, broadcast |
 | **SessionForm** | `components/SessionForm.tsx` | Modal para crear sesión: harness, modelo, workspace con skills |
@@ -677,11 +711,12 @@ agents/{nombre}/
 
 ### Workspaces disponibles
 
-| Workspace | Modelo por defecto | Skill | Descripción |
-|-----------|-------------------|-------|-------------|
-| **root** | (configurable) | — | Workspace genérico sin skills |
-| **debugging** | `opencode/minimax-m2.5-free` | systematic-debugging | Root-cause tracing, defense in depth, test isolation |
-| **documentation** | `opencode/minimax-m2.5-free` | ddf | Documentación de Diseño Funcional: 12 secciones, templates, checklists |
+| Workspace | Harness | Modelo por defecto | Skill | Descripción |
+|-----------|---------|-------------------|-------|-------------|
+| **root** | opencode | (configurable) | — | Workspace genérico sin skills |
+| **debugging** | opencode | `opencode/minimax-m2.5-free` | systematic-debugging | Root-cause tracing, defense in depth, test isolation |
+| **documentation** | opencode | `opencode/minimax-m2.5-free` | ddf | Documentación de Diseño Funcional: 12 secciones, templates, checklists |
+| **sports** | langgraph | `groq/llama-3.3-70b-versatile` | sports-expert | Experto deportivo con tools: web_search, get_sport_rules |
 
 ---
 
@@ -705,6 +740,7 @@ agents/{nombre}/
 | Pi | `acpx pi` | Pi Coding Agent |
 | Qoder | `acpx qoder` | Qoder agent |
 | Trae | `acpx trae` | Trae agent |
+| **LangGraph** | **Python directo** | **Framework agent — tools custom, Groq/LangChain** |
 
 ---
 
@@ -744,7 +780,7 @@ cd backend
 python -m pytest tests/ -v
 ```
 
-70+ tests en 8 archivos cubriendo:
+154 tests en 10 archivos cubriendo:
 
 | Archivo | Cobertura |
 |---------|-----------|
@@ -756,6 +792,8 @@ python -m pytest tests/ -v
 | `test_history_persistence.py` | Persistencia de historial con formato markdown |
 | `test_reconnect_timeout.py` | Reconexión con cooldown y timeouts |
 | `test_tool_call_lifecycle.py` | Ciclo de vida completo de tool calls: start → chunks → result |
+| `test_langgraph_agent.py` | Agente LangGraph: grafo, modelo factory, tools, streaming |
+| `test_langgraph_session.py` | Sesión LangGraph: historial, lazy build, system prompt |
 
 ---
 
@@ -771,10 +809,12 @@ python -m pytest tests/ -v
 | **6** | Health checks, reconexión y métricas | Completado |
 | **7** | Tool calling completo (ciclo de vida ACP → AG-UI) | Completado |
 | **8** | Componentes frontend modulares (ChatPanel, Sidebar, SessionForm, etc.) | Completado |
-| **9** | Base de datos para sesiones (reemplazar JSON) | Planificado |
-| **10** | Bucle de reacción GitHub (`githubkit`) | Planificado |
-| **11** | Harnesses framework (LangGraph, Google ADK) — agentes custom con tools propias | Planificado |
-| **12** | Coordinación multi-agente / deep agents (supervisor → workers) | Planificado |
+| **9** | Desacoplamiento frontend-backend: SSE push, auto-reconnect backend-driven | Completado |
+| **10** | Harness LangGraph: agente framework con tools custom (web_search, sport_rules) | Completado |
+| **11** | Base de datos para sesiones (reemplazar JSON) | Planificado |
+| **12** | Bucle de reacción GitHub (`githubkit`) | Planificado |
+| **13** | Harnesses framework adicionales (Google ADK, CrewAI) | Planificado |
+| **14** | Coordinación multi-agente / deep agents (supervisor → workers) | Planificado |
 
 ---
 

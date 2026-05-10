@@ -13,6 +13,7 @@ if sys.stdout.encoding != "utf-8":
 if sys.stderr.encoding != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8")
 
+import asyncio
 import json
 import os
 import unicodedata
@@ -129,6 +130,67 @@ def _update_metrics_after_turn(
     m["last_tool_calls"] = tool_calls
     m["last_text_chars"] = text_chars
     m["last_thinking_chars"] = thinking_chars
+
+
+# ---------------------------------------------------------------------------
+# SSE subscription: push status+metrics changes to connected clients
+# ---------------------------------------------------------------------------
+
+_status_subscribers: list[asyncio.Queue] = []
+
+
+def _build_status_snapshot() -> dict:
+    metrics = {}
+    for name in _sessions:
+        _init_metrics(name)
+        metrics[name] = _session_metrics[name]
+    return {
+        "status": {
+            name: {
+                "activity": _session_status.get(name, "idle"),
+                "health": _session_health.get(name, "connected"),
+            }
+            for name in _sessions
+        },
+        "metrics": metrics,
+    }
+
+
+def _notify_status_change():
+    """Push status snapshot to all SSE subscribers."""
+    if not _status_subscribers:
+        return
+    snapshot = _build_status_snapshot()
+    for q in list(_status_subscribers):
+        try:
+            q.put_nowait(snapshot)
+        except asyncio.QueueFull:
+            pass
+
+
+async def _auto_reconnect(name: str):
+    """Background task: auto-reconnect a disconnected CLI session."""
+    sess = _sessions.get(name)
+    if not sess or isinstance(sess, LangGraphSession):
+        return
+    for attempt in range(3):
+        await asyncio.sleep(5 * (attempt + 1))
+        if _session_health.get(name) != "disconnected":
+            return
+        _session_health[name] = "reconnecting"
+        _notify_status_change()
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, sess._ensure_connected)
+            _session_health[name] = "connected"
+            _notify_status_change()
+            print(f"[auto-reconnect] {name} reconnected (attempt {attempt + 1})", flush=True)
+            return
+        except Exception as e:
+            print(f"[auto-reconnect] {name} attempt {attempt + 1} failed: {e}", flush=True)
+    _session_health[name] = "disconnected"
+    _notify_status_change()
+    print(f"[auto-reconnect] {name} gave up after 3 attempts", flush=True)
 
 
 def _history_path(name: str) -> Path:
@@ -479,6 +541,39 @@ def all_session_metrics():
     return result
 
 
+@app.get("/sessions/subscribe")
+async def subscribe_sessions():
+    """SSE endpoint: streams session status+metrics in real time.
+
+    Replaces polling of /sessions/status + /sessions/metrics.
+    Sends an initial snapshot on connect, then pushes deltas on change.
+    Sends a full snapshot every 15s as keepalive.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    _status_subscribers.append(queue)
+
+    async def event_stream():
+        try:
+            yield f"event: status\ndata: {json.dumps(_build_status_snapshot(), ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield f"event: status\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    yield f"event: status\ndata: {json.dumps(_build_status_snapshot(), ensure_ascii=False)}\n\n"
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            if queue in _status_subscribers:
+                _status_subscribers.remove(queue)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/sessions/{name}/history")
 def get_session_history(name: str, tail: Optional[int] = None):
     """Return conversation history, preferring our own saved copy (preserves formatting)."""
@@ -718,7 +813,9 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
         _turn_start = _time.monotonic()
         _turn_tool_calls = 0
 
+        _prev_activity = None
         _session_status[name] = "thinking"
+        _notify_status_change()
         yield encoder.encode(RunStartedEvent(
             thread_id=input_data.thread_id,
             run_id=input_data.run_id,
@@ -764,6 +861,9 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                 # Use explicit lifecycle (no chunk transformer for reasoning)
                 if isinstance(ev, ReasoningMessageChunkEvent):
                     _session_status[name] = "thinking"
+                    if _prev_activity != "thinking":
+                        _prev_activity = "thinking"
+                        _notify_status_change()
                     accumulated_thinking.append(ev.delta)
                     if not reasoning_started:
                         yield encoder.encode(ReasoningMessageStartEvent(
@@ -782,6 +882,9 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                 # with TOOL_CALL_START/ARGS/END — do NOT send explicit lifecycle events
                 if isinstance(ev, ToolCallChunkEvent):
                     _session_status[name] = "tool_use"
+                    if _prev_activity != "tool_use":
+                        _prev_activity = "tool_use"
+                        _notify_status_change()
                     tc_id = ev.tool_call_id or str(uuid.uuid4())
                     tc_name = ev.tool_call_name or "tool"
                     # If this ID was already used (completed and closed), assign a new unique ID
@@ -789,10 +892,6 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                         tc_id = f"{tc_id}_{uuid.uuid4().hex[:8]}"
                     if tc_id not in open_tool_calls:
                         _turn_tool_calls += 1
-                        if reasoning_started:
-                            yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
-                            reasoning_started = False
-                            reasoning_id = str(uuid.uuid4())
                         open_tool_calls[tc_id] = tc_name
                         seen_tool_call_ids.add(tc_id)
                     # Ensure the chunk has toolCallId, toolCallName, and parentMessageId
@@ -814,6 +913,9 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                 # with TEXT_MESSAGE_START/CONTENT/END — do NOT send manual lifecycle events
                 if isinstance(ev, TextMessageChunkEvent):
                     _session_status[name] = "responding"
+                    if _prev_activity != "responding":
+                        _prev_activity = "responding"
+                        _notify_status_change()
                     accumulated_text.append(ev.delta)
                     if reasoning_started:
                         yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
@@ -833,6 +935,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
 
             _session_status[name] = "idle"
             _session_health[name] = "connected"
+            _notify_status_change()
 
             # Update per-session metrics
             _turn_elapsed_ms = int((_time.monotonic() - _turn_start) * 1000)
@@ -845,6 +948,7 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                 thinking_chars=_think_chars,
                 tool_calls=_turn_tool_calls,
             )
+            _notify_status_change()
 
             # Save accumulated content to our own history (preserves formatting)
             normalized = _normalize_name(name)
@@ -869,6 +973,9 @@ async def run_agent(name: str, input_data: RunAgentInput, request: Request):
                 yield encoder.encode(ReasoningMessageEndEvent(messageId=reasoning_id))
             _session_status[name] = "idle"
             _session_health[name] = "disconnected"
+            _notify_status_change()
+            if not isinstance(sess, LangGraphSession):
+                asyncio.create_task(_auto_reconnect(name))
             yield encoder.encode(RunErrorEvent(message=f"{type(e).__name__}: {e}"))
 
     return StreamingResponse(event_gen(), media_type=encoder.get_content_type())

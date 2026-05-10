@@ -78,7 +78,7 @@ class TestLangGraphSessionInit:
         with patch.object(langgraph_session, "build_sports_agent") as builder:
             builder.return_value = MagicMock()
             sess = LangGraphSession(name="t", working_dir=str(tmp_path), LLM=None)
-        assert sess.LLM == "openai/gpt-4o-mini"
+        assert sess.LLM == "groq/llama-3.3-70b-versatile"
 
     def test_close_clears_messages(self, tmp_path):
         with patch.object(langgraph_session, "build_sports_agent") as builder:

@@ -49,26 +49,18 @@ export default function Home() {
 
   const [statusMap, setStatusMap] = useState<Record<string, StatusEntry>>({});
   const [metricsMap, setMetricsMap] = useState<Record<string, SessionMetrics>>({});
-  const statusIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const fetchStatus = useCallback(async () => {
-    try {
-      const [statusRes, metricsRes] = await Promise.all([
-        fetch(`${BACKEND}/sessions/status`),
-        fetch(`${BACKEND}/sessions/metrics`),
-      ]);
-      if (statusRes.ok) setStatusMap(await statusRes.json());
-      if (metricsRes.ok) setMetricsMap(await metricsRes.json());
-    } catch {}
-  }, []);
 
   useEffect(() => {
-    fetchStatus();
-    statusIntervalRef.current = setInterval(fetchStatus, 1500);
-    return () => {
-      if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
-    };
-  }, [fetchStatus]);
+    const es = new EventSource(`${BACKEND}/sessions/subscribe`);
+    es.addEventListener("status", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.status) setStatusMap(data.status);
+        if (data.metrics) setMetricsMap(data.metrics);
+      } catch {}
+    });
+    return () => es.close();
+  }, []);
 
   const reconnectSession = useCallback(async (name: string) => {
     try {
@@ -76,22 +68,7 @@ export default function Home() {
         method: "POST",
       });
     } catch {}
-    fetchStatus();
-  }, [fetchStatus]);
-
-  const reconnectCooldowns = useRef<Map<string, number>>(new Map());
-  useEffect(() => {
-    const now = Date.now();
-    for (const [name, entry] of Object.entries(statusMap)) {
-      if (entry.health === "disconnected") {
-        const lastAttempt = reconnectCooldowns.current.get(name) || 0;
-        if (now - lastAttempt > 10_000) {
-          reconnectCooldowns.current.set(name, now);
-          reconnectSession(name);
-        }
-      }
-    }
-  }, [statusMap, reconnectSession]);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {

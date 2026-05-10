@@ -261,6 +261,10 @@ def build_sports_agent(model_name: str, system_prompt: str):
                 if is_tool_error and attempt < max_retries - 1:
                     print(f"[langgraph] Tool call generation failed (attempt {attempt + 1}), retrying WITH tools: {e}", flush=True)
                     continue
+                if is_tool_error:
+                    print(f"[langgraph] Tool call retries exhausted — falling back to response without tools: {e}", flush=True)
+                    response = base_llm.invoke(messages)
+                    return {"messages": [response]}
                 raise
 
     def should_continue(state: SportsAgentState) -> str:
