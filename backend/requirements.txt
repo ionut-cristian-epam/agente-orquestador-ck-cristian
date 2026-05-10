@@ -9,5 +9,6 @@ langchain-core>=0.3
 langchain-openai>=0.3
 langchain-anthropic>=0.3
 langchain-google-genai>=2.1
+langchain-groq>=1.0
 tavily-python>=0.5
 ddgs>=9.0

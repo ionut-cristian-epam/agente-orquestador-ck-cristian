@@ -116,9 +116,7 @@ class TestCreateChatModel:
     def test_groq_with_key_uses_groq_endpoint(self):
         with patch.dict(os.environ, {"GROQ_API_KEY": "fake"}):
             model = _create_chat_model("groq/llama-3.3-70b-versatile")
-        assert type(model).__name__ == "ChatOpenAI"
-        # base_url should point to Groq
-        assert "groq.com" in str(model.openai_api_base or model.root_async_client.base_url)
+        assert type(model).__name__ == "ChatGroq"
 
     def test_nagaai_without_key_raises(self):
         with patch.dict(os.environ, {}, clear=False):

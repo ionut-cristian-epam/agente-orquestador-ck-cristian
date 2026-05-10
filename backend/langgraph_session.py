@@ -54,17 +54,19 @@ def _load_skill_metadata(working_dir: str) -> dict:
     if not prompt_path.exists():
         return meta
     text = prompt_path.read_text(encoding="utf-8")
-    meta["system_prompt"] = text
+    # Strip YAML frontmatter — it's metadata, not instructions for the model
+    raw_text = text
     # Extract skill name from frontmatter or path
     import re
-    m = re.match(r"^---\s*\n(.+?)\n---", text, re.DOTALL)
+    m = re.match(r"^---\s*\n(.+?)\n---\s*\n?", raw_text, re.DOTALL)
     if m:
         for line in m.group(1).splitlines():
             if line.startswith("name:"):
                 meta["skill_name"] = line.split(":", 1)[1].strip().strip('"')
                 break
+        meta["system_prompt"] = raw_text[m.end():].strip()
     else:
-        # Fallback: directory name (skills/{name}/SKILL.md) or file stem
+        meta["system_prompt"] = raw_text.strip()
         parent = prompt_path.parent
         meta["skill_name"] = parent.name if parent.name != "skills" else prompt_path.stem
     return meta
@@ -94,7 +96,7 @@ class LangGraphSession:
     ):
         self.name = name
         self.working_dir = working_dir
-        self.LLM = LLM or "openai/gpt-4o-mini"
+        self.LLM = LLM or "groq/llama-3.3-70b-versatile"
 
         skill = _load_skill_metadata(working_dir)
         self._skill_name = skill["skill_name"]

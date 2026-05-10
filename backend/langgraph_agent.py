@@ -172,11 +172,10 @@ def _create_chat_model(model_name: str):
         api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
             raise RuntimeError("GROQ_API_KEY not set in environment")
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
+        from langchain_groq import ChatGroq
+        return ChatGroq(
             model=model_id,
             api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
             streaming=True,
         )
 
@@ -238,24 +237,31 @@ def build_sports_agent(model_name: str, system_prompt: str):
     tool_names = [t.name for t in SPORTS_TOOLS]
     print(f"[langgraph] Graph built — model={model_name!r} tools={tool_names}", flush=True)
 
+    # Verify tool binding produced valid schemas
+    try:
+        bound_kwargs = llm.kwargs if hasattr(llm, "kwargs") else {}
+        n_tools = len(bound_kwargs.get("tools", []))
+        print(f"[langgraph] Tool binding check: {n_tools} tool schema(s) in LLM kwargs", flush=True)
+    except Exception as e:
+        print(f"[langgraph] Tool binding check failed: {e}", flush=True)
+
     def agent_node(state: SportsAgentState) -> dict:
         messages = state["messages"]
         if not messages or not isinstance(messages[0], SystemMessage):
             messages = [SystemMessage(content=system_prompt)] + list(messages)
-        try:
-            response = llm.invoke(messages)
-        except Exception as e:
-            # Some providers (notably Groq with llama-3.3) occasionally
-            # generate malformed tool_call JSON, which surfaces as an
-            # openai.APIError "Failed to call a function". Retry once
-            # without tools so the user still receives a response.
-            err_str = str(e)
-            if "function" in err_str.lower() or "tool" in err_str.lower():
-                print(f"[langgraph] tool_call failure ({type(e).__name__}: {err_str[:200]}); retrying without tools", flush=True)
-                response = base_llm.invoke(messages)
-            else:
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                response = llm.invoke(messages)
+                print(f"[langgraph] agent_node response: tool_calls={len(response.tool_calls) if hasattr(response, 'tool_calls') and response.tool_calls else 0}", flush=True)
+                return {"messages": [response]}
+            except Exception as e:
+                err_str = str(e).lower()
+                is_tool_error = "function" in err_str or "tool" in err_str or "failed_generation" in err_str
+                if is_tool_error and attempt < max_retries - 1:
+                    print(f"[langgraph] Tool call generation failed (attempt {attempt + 1}), retrying WITH tools: {e}", flush=True)
+                    continue
                 raise
-        return {"messages": [response]}
 
     def should_continue(state: SportsAgentState) -> str:
         last = state["messages"][-1]
