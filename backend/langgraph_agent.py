@@ -173,10 +173,14 @@ def _create_chat_model(model_name: str):
         if not api_key:
             raise RuntimeError("GROQ_API_KEY not set in environment")
         from langchain_groq import ChatGroq
+        # streaming=False: ChatGroq streaming + bind_tools drops tool_call_chunks
+        # aggregation, leaving AIMessage.tool_calls empty. Non-streaming invoke
+        # returns full tool_calls reliably; astream_events still emits
+        # on_chat_model_end and the synthetic-chunk fallback covers UI streaming.
         return ChatGroq(
             model=model_id,
             api_key=api_key,
-            streaming=True,
+            streaming=False,
         )
 
     if provider == "nagaai":
