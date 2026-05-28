@@ -12,7 +12,19 @@ interface Workspace {
   name: string;
   path: string;
   description: string;
+  harness: string | null;
   skills: { name: string; description: string }[];
+}
+
+const CLI_HARNESSES = new Set(["opencode", "claude", "codex", "gemini", "cursor", "copilot"]);
+
+function filterWorkspaces(all: Workspace[], harness: string): Workspace[] {
+  return all.filter((ws) => {
+    if (!ws.harness) return true; // root always visible
+    if (harness === "langgraph") return ws.harness === "langgraph";
+    if (CLI_HARNESSES.has(harness)) return ws.harness === "opencode";
+    return true;
+  });
 }
 
 export function SessionForm({
@@ -32,18 +44,23 @@ export function SessionForm({
   const [modelData, setModelData] = useState<ModelData | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const filtered = filterWorkspaces(workspaces, formHarness);
 
   useEffect(() => {
     fetch(`${BACKEND}/workspaces`)
       .then((r) => r.json())
-      .then((data: Workspace[]) => {
-        setWorkspaces(data);
-        if (data.length > 0 && !formCwd) {
-          setFormCwd(data[0].path);
-        }
-      })
+      .then((data: Workspace[]) => setWorkspaces(data))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (filtered.length === 0) return;
+    const match = filtered.find((ws) => ws.path === formCwd);
+    if (!match) {
+      const nonRoot = filtered.find((ws) => ws.harness !== null);
+      setFormCwd((nonRoot ?? filtered[0]).path);
+    }
+  }, [formHarness, workspaces]);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,14 +124,21 @@ export function SessionForm({
         onChange={(e) => setFormCwd(e.target.value)}
         className="w-full px-2 py-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100"
       >
-        {workspaces.map((ws) => (
+        {filtered.map((ws) => (
           <option key={ws.path} value={ws.path}>
-            {ws.name === "root" ? "📁 root (generic)" : `🤖 ${ws.name}`}
+            {ws.name === "root"
+              ? "📁 root (generic)"
+              : `🤖 ${ws.name} — ${ws.description}`}
           </option>
         ))}
       </select>
+      {filtered.length <= 1 && filtered.every((ws) => !ws.harness) && (
+        <div className="px-2 py-1.5 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded">
+          No hay agentes configurados para <strong>{formHarness}</strong>. Solo workspace genérico disponible.
+        </div>
+      )}
       {(() => {
-        const selected = workspaces.find((ws) => ws.path === formCwd);
+        const selected = filtered.find((ws) => ws.path === formCwd);
         if (!selected || selected.skills.length === 0) return null;
         return (
           <div className="px-2 py-1.5 text-xs bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700 rounded">

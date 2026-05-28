@@ -11,6 +11,7 @@ from langgraph_agent import (
     _create_chat_model,
     _do_search,
     _extract_text_from_chunk,
+    _parse_failed_generation,
     build_sports_agent,
     get_sport_rules,
     web_search,
@@ -201,6 +202,65 @@ class TestThinkingExtraction:
         chunk = MagicMock()
         chunk.content = [{"type": "redacted_thinking", "data": "..."}]
         assert "redacted" in _extract_thinking_from_chunk(chunk)
+
+
+class TestParseFailedGeneration:
+    """Recover tool calls from Groq/Llama malformed function calling."""
+
+    def test_parenthesized_format(self):
+        err = Exception(
+            'Error code: 400 - {"error": {"message": "tool call validation failed: '
+            "attempted to call tool 'web_search(query=\"Balon de Oro 2022 ganador\")' "
+            'which was not in request.tools", "type": "invalid_request_error", '
+            '"code": "tool_use_failed", "failed_generation": '
+            '\'<function=web_search(query="Balon de Oro 2022 ganador")></function>\'}}'
+        )
+        result = _parse_failed_generation(err)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["name"] == "web_search"
+        assert result[0]["args"]["query"] == "Balon de Oro 2022 ganador"
+
+    def test_json_array_format(self):
+        err = Exception(
+            'failed_generation": \'<function=web_search [{"query": "test query"}]</function>\''
+        )
+        result = _parse_failed_generation(err)
+        assert result is not None
+        assert result[0]["name"] == "web_search"
+        assert result[0]["args"]["query"] == "test query"
+
+    def test_json_object_format(self):
+        err = Exception(
+            'failed_generation": \'<function=web_search{"query": "test"}></function>\''
+        )
+        result = _parse_failed_generation(err)
+        assert result is not None
+        assert result[0]["args"]["query"] == "test"
+
+    def test_get_sport_rules_recovery(self):
+        err = Exception(
+            '<function=get_sport_rules(sport_name="cricket")></function>'
+        )
+        result = _parse_failed_generation(err)
+        assert result is not None
+        assert result[0]["name"] == "get_sport_rules"
+        assert result[0]["args"]["sport_name"] == "cricket"
+
+    def test_unknown_tool_ignored(self):
+        err = Exception('<function=unknown_tool(x="1")></function>')
+        result = _parse_failed_generation(err)
+        assert result is None
+
+    def test_no_match_returns_none(self):
+        err = Exception("Some unrelated error message")
+        result = _parse_failed_generation(err)
+        assert result is None
+
+    def test_recovered_call_has_id(self):
+        err = Exception('<function=web_search(query="test")></function>')
+        result = _parse_failed_generation(err)
+        assert result[0]["id"].startswith("recovered_")
 
 
 class TestBuildSportsAgent:

@@ -127,6 +127,65 @@ def get_sport_rules(sport_name: str) -> str:
 
 SPORTS_TOOLS = [web_search, get_sport_rules]
 
+_TOOL_NAMES = {t.name for t in SPORTS_TOOLS}
+
+
+# ---------------------------------------------------------------------------
+# Recover tool calls from malformed LLM output (Groq/Llama)
+# ---------------------------------------------------------------------------
+
+def _parse_failed_generation(error: Exception) -> list[dict] | None:
+    """Extract tool calls from Groq's failed_generation error field.
+
+    Llama models on Groq sometimes emit tool calls as text instead of structured
+    function calling, e.g.:
+      <function=web_search(query="...")></function>
+      <function=web_search [{"query": "..."}]</function>
+      <function=web_search{"query": "..."}</function>
+
+    Returns a list of {name, args, id} dicts if parseable, else None.
+    """
+    import re
+
+    err_str = str(error)
+    pattern = r"<function=(\w+)\s*(\(.*?\)|\[.*?\]|\{.*?\})\s*>?<?/?function>?"
+    matches = re.findall(pattern, err_str)
+    if not matches:
+        return None
+
+    calls = []
+    for func_name, raw_args in matches:
+        if func_name not in _TOOL_NAMES:
+            continue
+        raw_args = raw_args.strip()
+        args = {}
+        # Format: (query="value") or (query="value", max_results=5)
+        if raw_args.startswith("(") and raw_args.endswith(")"):
+            inner = raw_args[1:-1]
+            for pair in re.findall(r'(\w+)\s*=\s*"([^"]*)"', inner):
+                args[pair[0]] = pair[1]
+            for pair in re.findall(r'(\w+)\s*=\s*(\d+)', inner):
+                args[pair[0]] = int(pair[1])
+        # Format: [{"key": "value"}] or {"key": "value"}
+        else:
+            try:
+                parsed = json.loads(raw_args)
+                if isinstance(parsed, list) and parsed:
+                    args = parsed[0] if isinstance(parsed[0], dict) else {}
+                elif isinstance(parsed, dict):
+                    args = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        if args:
+            calls.append({
+                "name": func_name,
+                "args": args,
+                "id": f"recovered_{uuid.uuid4().hex[:8]}",
+            })
+
+    return calls if calls else None
+
 
 # ---------------------------------------------------------------------------
 # Model factory
@@ -262,14 +321,22 @@ def build_sports_agent(model_name: str, system_prompt: str):
             except Exception as e:
                 err_str = str(e).lower()
                 is_tool_error = "function" in err_str or "tool" in err_str or "failed_generation" in err_str
-                if is_tool_error and attempt < max_retries - 1:
-                    print(f"[langgraph] Tool call generation failed (attempt {attempt + 1}), retrying WITH tools: {e}", flush=True)
+                if not is_tool_error:
+                    raise
+                # Try to recover tool calls from malformed generation
+                recovered = _parse_failed_generation(e)
+                if recovered:
+                    print(f"[langgraph] Recovered {len(recovered)} tool call(s) from failed_generation: {[c['name'] for c in recovered]}", flush=True)
+                    return {"messages": [AIMessage(
+                        content="",
+                        tool_calls=recovered,
+                    )]}
+                if attempt < max_retries - 1:
+                    print(f"[langgraph] Tool call generation failed (attempt {attempt + 1}), retrying: {e}", flush=True)
                     continue
-                if is_tool_error:
-                    print(f"[langgraph] Tool call retries exhausted — falling back to response without tools: {e}", flush=True)
-                    response = base_llm.invoke(messages)
-                    return {"messages": [response]}
-                raise
+                print(f"[langgraph] Tool call retries exhausted — falling back to response without tools: {e}", flush=True)
+                response = base_llm.invoke(messages)
+                return {"messages": [response]}
 
     def should_continue(state: SportsAgentState) -> str:
         last = state["messages"][-1]
@@ -354,12 +421,8 @@ async def stream_langgraph_events(
     """
     msg_id = msg_id_seed or str(uuid.uuid4())
     emitted_tool_call_ids: set[str] = set()
-    # Track whether we have emitted any text chunk during this run.
-    # Some providers (e.g. Groq via OpenAI-compat) sometimes deliver the
-    # response in one bulk piece via on_chat_model_end without firing
-    # on_chat_model_stream. In that case we emit a synthetic chunk so the
-    # frontend still receives the assistant text.
     text_emitted = False
+    llm_call_count = 0
 
     async for event in graph.astream_events(
         {"messages": messages},
@@ -368,15 +431,64 @@ async def stream_langgraph_events(
         kind = event.get("event")
         data = event.get("data", {})
 
+        # --- Graph node transitions ---
+        if kind == "on_chain_start":
+            node_name = event.get("name", "")
+            if node_name in ("agent", "tools") and expose_reasoning:
+                label = "🧠 Pensando..." if node_name == "agent" else "⚙️ Ejecutando tools..."
+                yield ReasoningMessageChunkEvent(delta=f"**{label}**\n\n")
+            continue
+
+        # --- Recovered tool calls (manually constructed AIMessage, no on_chat_model_end) ---
+        if kind == "on_chain_end":
+            node_name = event.get("name", "")
+            if node_name == "agent":
+                output = data.get("output", {})
+                msgs = output.get("messages", []) if isinstance(output, dict) else []
+                for m in msgs:
+                    if isinstance(m, AIMessage) and m.tool_calls and not any(
+                        tc.get("id", "") in emitted_tool_call_ids for tc in m.tool_calls
+                    ):
+                        if expose_reasoning:
+                            yield ReasoningMessageChunkEvent(
+                                delta=f"🔄 **Recuperado {len(m.tool_calls)} tool call(s) de formato malformado:**\n\n",
+                            )
+                        for tc in m.tool_calls:
+                            tc_id = tc.get("id") or str(uuid.uuid4())
+                            if tc_id in emitted_tool_call_ids:
+                                continue
+                            emitted_tool_call_ids.add(tc_id)
+                            tc_name = tc.get("name", "tool")
+                            args_json = json.dumps(tc.get("args", {}), ensure_ascii=False)
+                            if expose_reasoning:
+                                yield ReasoningMessageChunkEvent(
+                                    delta=f"- `{tc_name}({args_json})`\n",
+                                )
+                            yield ToolCallChunkEvent(
+                                tool_call_id=tc_id,
+                                tool_call_name=tc_name,
+                                delta=args_json,
+                            )
+                        if expose_reasoning:
+                            yield ReasoningMessageChunkEvent(delta="\n")
+            continue
+
+        # --- LLM invocation start ---
+        if kind == "on_chat_model_start":
+            llm_call_count += 1
+            if expose_reasoning:
+                suffix = "" if llm_call_count == 1 else f" (iteración {llm_call_count})"
+                yield ReasoningMessageChunkEvent(
+                    delta=f"💬 Consultando LLM{suffix}...\n\n",
+                )
+            continue
+
         if kind == "on_chat_model_stream":
             chunk = data.get("chunk")
             if chunk is None:
-                print("[langgraph] stream chunk=None", flush=True)
                 continue
-            # Native thinking blocks (Anthropic extended thinking)
             thinking = _extract_thinking_from_chunk(chunk)
             text = _extract_text_from_chunk(chunk)
-            print(f"[langgraph] stream chunk text_len={len(text)} thinking_len={len(thinking)} content_type={type(chunk.content).__name__}", flush=True)
             if thinking:
                 yield ReasoningMessageChunkEvent(delta=thinking)
             if text:
@@ -393,13 +505,9 @@ async def stream_langgraph_events(
             if isinstance(output, AIMessage):
                 if message_collector is not None:
                     message_collector.append(output)
-                print(f"[langgraph] on_chat_model_end: tool_calls={len(output.tool_calls or [])} text_len={len(output.content) if isinstance(output.content, str) else 'list'} text_emitted={text_emitted}", flush=True)
-                # Fallback: if no streaming chunks delivered text but the final
-                # message has text content, emit it as a synthetic chunk.
                 if not text_emitted and not output.tool_calls:
                     final_text = output.content if isinstance(output.content, str) else ""
                     if not final_text and isinstance(output.content, list):
-                        # Anthropic-style list of blocks
                         parts = []
                         for block in output.content:
                             if isinstance(block, dict) and block.get("type") == "text":
@@ -413,6 +521,10 @@ async def stream_langgraph_events(
                             delta=final_text,
                         )
                 if output.tool_calls:
+                    if expose_reasoning:
+                        yield ReasoningMessageChunkEvent(
+                            delta=f"🔧 **Decidió llamar {len(output.tool_calls)} tool(s):**\n\n",
+                        )
                     for tc in output.tool_calls:
                         tc_id = tc.get("id") or str(uuid.uuid4())
                         if tc_id in emitted_tool_call_ids:
@@ -421,15 +533,20 @@ async def stream_langgraph_events(
                         tc_name = tc.get("name", "tool")
                         args_json = json.dumps(tc.get("args", {}), ensure_ascii=False)
                         if expose_reasoning:
-                            args_preview = args_json if len(args_json) <= 200 else args_json[:197] + "..."
                             yield ReasoningMessageChunkEvent(
-                                delta=f"🔧 Llamando a `{tc_name}` con argumentos: `{args_preview}`\n\n",
+                                delta=f"- `{tc_name}({args_json})`\n",
                             )
                         yield ToolCallChunkEvent(
                             tool_call_id=tc_id,
                             tool_call_name=tc_name,
                             delta=args_json,
                         )
+                    if expose_reasoning:
+                        yield ReasoningMessageChunkEvent(delta="\n")
+                elif not output.tool_calls and expose_reasoning:
+                    yield ReasoningMessageChunkEvent(
+                        delta="📝 Generando respuesta final...\n\n",
+                    )
             continue
 
         if kind == "on_tool_end":
@@ -440,10 +557,10 @@ async def stream_langgraph_events(
                 content = output.content
                 if not isinstance(content, str):
                     content = json.dumps(content, ensure_ascii=False, default=str)
-                print(f"[langgraph] on_tool_end: tool_call_id={output.tool_call_id} result_len={len(content)}", flush=True)
                 if expose_reasoning:
+                    preview = content[:500] + "..." if len(content) > 500 else content
                     yield ReasoningMessageChunkEvent(
-                        delta=f"✅ Recibido resultado ({len(content)} caracteres). Procesando para componer respuesta...\n\n",
+                        delta=f"✅ **Resultado** ({len(content)} chars):\n\n```\n{preview}\n```\n\n",
                     )
                 yield ToolCallResultEvent(
                     message_id=output.tool_call_id or str(uuid.uuid4()),
