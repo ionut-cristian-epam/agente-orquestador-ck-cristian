@@ -1,0 +1,108 @@
+{
+  "features": [
+    {
+      "id": "feat-001",
+      "name": "ACP→AG-UI Bridge",
+      "description": "Translation layer mapping ACP JSON-RPC notifications (session/update) to AG-UI protocol events (text chunks, reasoning, tool calls). Core of multi-harness support via acpx subprocess sessions.",
+      "dependencies": [],
+      "status": "done",
+      "evidence": "backend/acp_to_agui.py implemented, backend/tests/test_acp_to_agui.py passing"
+    },
+    {
+      "id": "feat-002",
+      "name": "Multi-Harness Session Management",
+      "description": "Create, list, stream, and close sessions across harnesses (opencode, claude, codex, gemini, cursor, copilot, langgraph). Subprocess-based via acpx with model selection and working directory per session.",
+      "dependencies": ["feat-001"],
+      "status": "done",
+      "evidence": "backend/launch_sessions.py + backend/agui_server.py endpoints, backend/tests/test_session.py passing"
+    },
+    {
+      "id": "feat-003",
+      "name": "LangGraph In-Process Agent",
+      "description": "In-process LangGraph StateGraph agent with tool use, streaming AG-UI events directly without acpx/ACP. Supports custom skills loaded from workspace langgraph_agent.json.",
+      "dependencies": [],
+      "status": "done",
+      "evidence": "backend/langgraph_agent.py + backend/langgraph_session.py, tests in test_langgraph_agent.py and test_langgraph_session.py"
+    },
+    {
+      "id": "feat-004",
+      "name": "AG-UI FastAPI Server",
+      "description": "FastAPI server exposing AG-UI protocol endpoints: POST /agent/{name} (SSE streaming), GET/POST/DELETE /sessions, model listing. CopilotKit runtimeUrl target with CORS and UTF-8 support.",
+      "dependencies": ["feat-001", "feat-002", "feat-003"],
+      "status": "done",
+      "evidence": "backend/agui_server.py, backend/tests/test_agui_server.py passing"
+    },
+    {
+      "id": "feat-005",
+      "name": "Next.js Chat Frontend",
+      "description": "CopilotKit-powered Next.js frontend with multi-session sidebar, chat panel, session creation form, broadcast messaging, theme customization, session status/health indicators, and metrics display.",
+      "dependencies": ["feat-004"],
+      "status": "done",
+      "evidence": "frontend/app/ components: ChatPanel, Sidebar, SessionForm, BroadcastForm, ThemePanel, SessionListItem"
+    },
+    {
+      "id": "feat-006",
+      "name": "Agent Workspace Skills",
+      "description": "Per-workspace skill system for LangGraph agent: custom system prompts, tool definitions, and skill metadata loaded from langgraph_agent.json in each workspace directory.",
+      "dependencies": ["feat-003"],
+      "status": "done",
+      "evidence": "langgraph_session.py _load_skill_metadata(), SKILL.md documentation"
+    },
+    {
+      "id": "feat-007",
+      "name": "100+ LLM Model Support",
+      "description": "Catalog of 100+ models across providers (NagaAI free, OpenCode Zen, Amazon Bedrock, Copilot CLI) with model selection per session and provider-specific config handling.",
+      "dependencies": ["feat-002"],
+      "status": "done",
+      "evidence": "backend/available_models.py with SUPPORTED_MODELS_OPENCODE and SUPPORTED_MODELS_COPILOT_CLI"
+    },
+    {
+      "id": "feat-008",
+      "name": "Session History Persistence",
+      "description": "Chat message history persistence across page reloads using localStorage (frontend) and in-memory/file state (backend). Thread ID management per session.",
+      "dependencies": ["feat-004", "feat-005"],
+      "status": "done",
+      "evidence": "frontend/app/types.ts STORAGE_KEY_PREFIX/THREAD_KEY_PREFIX, backend/tests/test_history_persistence.py"
+    },
+    {
+      "id": "feat-009",
+      "name": "Reconnect & Health Monitoring",
+      "description": "SSE reconnection with timeout handling, session health states (connected/disconnected/reconnecting), and per-session status tracking (idle/thinking/tool_use/responding).",
+      "dependencies": ["feat-004", "feat-005"],
+      "status": "done",
+      "evidence": "frontend/app/types.ts STATUS_CONFIG/HEALTH_CONFIG, backend/tests/test_reconnect_timeout.py"
+    },
+    {
+      "id": "feat-010",
+      "name": "Tool Call Lifecycle",
+      "description": "End-to-end tool call flow: tool call chunks streamed to frontend, tool execution, result events back to agent. Visible in chat UI with tool_use status indicator.",
+      "dependencies": ["feat-003", "feat-004"],
+      "status": "done",
+      "evidence": "backend/tests/test_tool_call_lifecycle.py passing"
+    },
+    {
+      "id": "feat-011",
+      "name": "Harness Engineering Framework",
+      "description": "Integrate harness-creator skill for scaffolding, validating, and benchmarking harness quality across agent workspaces. Standardize harness patterns for new workspace onboarding.",
+      "dependencies": ["feat-006"],
+      "status": "in-progress",
+      "evidence": ".agents/skills/harness-creator installed, validate-harness 100/100 on root project"
+    },
+    {
+      "id": "feat-012",
+      "name": "Broadcast Multi-Session Messaging",
+      "description": "Send same prompt to multiple active sessions simultaneously from frontend BroadcastForm component.",
+      "dependencies": ["feat-002", "feat-005"],
+      "status": "done",
+      "evidence": "frontend/app/components/BroadcastForm.tsx implemented"
+    },
+    {
+      "id": "feat-013",
+      "name": "Test Coverage Expansion",
+      "description": "Expand backend test suite: integration tests for LangGraph, UTF-8 encoding, reconnect timeout, session lifecycle, tool calls. Target: all critical paths covered.",
+      "dependencies": ["feat-001", "feat-002", "feat-003", "feat-004"],
+      "status": "in-progress",
+      "evidence": "11 test files in backend/tests/, some areas may need additional coverage"
+    }
+  ]
+}
